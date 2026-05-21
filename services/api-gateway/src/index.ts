@@ -5,6 +5,8 @@ import { logger } from '@code-execution/logger';
 import { startMetricsServer } from '@code-execution/metrics';
 import { initDb } from './db.js';
 import { submissionRoutes } from './routes/submissions.js';
+import { redis } from './redis.js';
+import { QUEUE_KEYS } from '@code-execution/contracts';
 
 const app = fastify({
   logger: false // Use custom Pino logger instead
@@ -25,7 +27,11 @@ async function bootstrap() {
     await initDb();
 
     // 2. Start Metrics Server
-    await startMetricsServer(METRICS_PORT);
+    await startMetricsServer(METRICS_PORT, {
+      queueDepthProvider: async () => {
+        return await redis.llen(QUEUE_KEYS.PENDING);
+      }
+    });
     logger.info(`Prometheus Metrics server running on port ${METRICS_PORT}`);
 
     // 3. Start API Gateway

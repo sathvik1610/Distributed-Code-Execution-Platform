@@ -2,6 +2,8 @@ import 'dotenv/config';
 import { logger } from '@code-execution/logger';
 import { startMetricsServer } from '@code-execution/metrics';
 import { runReaperScan } from './reaper.js';
+import { redis } from './redis.js';
+import { QUEUE_KEYS } from '@code-execution/contracts';
 
 // ── Configuration ──────────────────────────────────────────────────────────
 
@@ -17,7 +19,11 @@ async function bootstrap() {
     logger.info('Starting System Monitor / Reaper service...');
 
     // Start Prometheus metrics server
-    await startMetricsServer(METRICS_PORT);
+    await startMetricsServer(METRICS_PORT, {
+      queueDepthProvider: async () => {
+        return await redis.llen(QUEUE_KEYS.PENDING);
+      }
+    });
     logger.info(`Prometheus Metrics server running on port ${METRICS_PORT}`);
 
     // Run an immediate scan on startup to recover jobs from any crash during downtime

@@ -5,9 +5,22 @@ import http from 'http';
 client.collectDefaultMetrics();
 
 // Define Metrics
+let queueDepthProvider: (() => Promise<number>) | null = null;
+
+// Define Metrics
 export const queueDepth = new client.Gauge({
   name: 'code_execution_queue_depth',
-  help: 'Number of pending jobs in the queue'
+  help: 'Number of pending jobs in the queue',
+  async collect() {
+    if (queueDepthProvider) {
+      try {
+        const depth = await queueDepthProvider();
+        this.set(depth);
+      } catch (err) {
+        // Silent catch to prevent prom-client scrape errors
+      }
+    }
+  }
 });
 
 export const dequeueLatency = new client.Histogram({
@@ -67,7 +80,13 @@ export const rateLimitHits = new client.Counter({
 /**
  * Starts a standalone HTTP server to expose Prometheus metrics
  */
-export function startMetricsServer(port: number): Promise<http.Server> {
+export function startMetricsServer(
+  port: number,
+  options?: { queueDepthProvider?: () => Promise<number> }
+): Promise<http.Server> {
+  if (options?.queueDepthProvider) {
+    queueDepthProvider = options.queueDepthProvider;
+  }
   return new Promise((resolve) => {
     const server = http.createServer(async (req, res) => {
       if (req.url === '/metrics') {

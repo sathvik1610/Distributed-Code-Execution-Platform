@@ -250,7 +250,11 @@ const METRICS_PORT = parseInt(process.env.METRICS_PORT || '9101', 10);
 
 async function bootstrap() {
   try {
-    await startMetricsServer(METRICS_PORT);
+    await startMetricsServer(METRICS_PORT, {
+      queueDepthProvider: async () => {
+        return await redis.llen(QUEUE_KEYS.PENDING);
+      }
+    });
     logger.info(`Prometheus Metrics server running on port ${METRICS_PORT}`);
 
     // Start processing — non-blocking, runs until SIGTERM
