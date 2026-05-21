@@ -16,11 +16,6 @@ app.register(fastifyWebsocket);
 // Register routes
 app.register(submissionRoutes);
 
-// Health check endpoint
-app.get('/health', async () => {
-  return { status: 'OK' };
-});
-
 const PORT = parseInt(process.env.PORT || '8000', 10);
 const METRICS_PORT = parseInt(process.env.METRICS_PORT || '9100', 10);
 
