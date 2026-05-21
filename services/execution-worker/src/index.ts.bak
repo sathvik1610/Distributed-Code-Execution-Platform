@@ -178,47 +178,24 @@ async function processQueue() {
         errorMessage = `Execution failed with exit code ${result.exitCode}`;
       }
 
-      // ── Atomic transactional result persistence ────────
-      // BEGIN/COMMIT guarantees that the result INSERT and the status UPDATE
-      // are either BOTH committed or BOTH rolled back. This closes the
-      // split-brain crash window where a process kill between the two
-      // statements would leave submissions.status permanently stuck at RUNNING
-      // while submission_results already holds the output.
-      //
-      // The LREM acknowledgement is placed AFTER the COMMIT intentionally:
-      // if the process crashes mid-transaction, Postgres rolls back automatically,
-      // the job stays in the processing queue, and the System Monitor reaper
-      // will recover and re-enqueue it safely.
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
+      // ── Persist result (idempotent) ─────────────────────
+      // ON CONFLICT (job_id) DO NOTHING: If the worker crashes AFTER writing
+      // but BEFORE acknowledging the queue, the retry will skip the DB write.
+      await pool.query(
+        `INSERT INTO submission_results
+           (job_id, exit_code, stdout, stderr, error_message, execution_time_ms)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (job_id) DO NOTHING`,
+        [job.jobId, result.exitCode, result.stdout, result.stderr, errorMessage, result.executionTimeMs]
+      );
 
-        // 1. Insert result — idempotent: skip silently if a prior attempt already wrote it
-        await client.query(
-          `INSERT INTO submission_results
-             (job_id, exit_code, stdout, stderr, error_message, execution_time_ms)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (job_id) DO NOTHING`,
-          [job.jobId, result.exitCode, result.stdout, result.stderr, errorMessage, result.executionTimeMs]
-        );
-
-        // 2. Update parent submission status within the same atomic boundary
-        await client.query(
-          `UPDATE submissions SET status = $1, updated_at = NOW() WHERE id = $2`,
-          [finalStatus, job.jobId]
-        );
-
-        await client.query('COMMIT');
-      } catch (txError) {
-        await client.query('ROLLBACK');
-        logger.error({ jobId: job.jobId, txError }, 'Result transaction rolled back — job will be retried by reaper');
-        throw txError; // Re-throw so the outer catch triggers requeueWithBackoff
-      } finally {
-        client.release();
-      }
+      // ── Update submission status ────────────────────────
+      await pool.query(
+        `UPDATE submissions SET status = $1, updated_at = NOW() WHERE id = $2`,
+        [finalStatus, job.jobId]
+      );
 
       // ── Acknowledge: remove from processing queue ───────
-      // Only reached if the transaction above committed successfully.
       await redis.lrem(processingQueue, 1, rawJob);
 
       // ── Update Prometheus metrics ───────────────────────
