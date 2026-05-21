@@ -103,7 +103,7 @@ Grafana dashboards are provisioned out-of-the-box (access at `http://localhost:3
 
 ---
 
-## ⚠️ Known Limitations & Scale Gaps (Interview Trade-offs)
+## ⚠️ Known Limitations & Scale Gaps
 
 If scaling this system to support large-scale workloads, these are the known operational bottlenecks and mitigation strategies:
 
