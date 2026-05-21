@@ -120,14 +120,30 @@ export async function submissionRoutes(fastify: FastifyInstance) {
       limit?: number;
       status?: string;
     };
+
+    const validStatuses = Object.values(SubmissionStatus) as string[];
+    if (status && !validStatuses.includes(status)) {
+      return reply.status(400).send({ error: 'Invalid status filter' });
+    }
+
     const offset = (page - 1) * limit;
 
-    const statusFilter = status ? `WHERE s.status = '${status}'` : '';
+    const queryParams: any[] = [];
+    let statusFilter = '';
+    if (status) {
+      statusFilter = 'WHERE s.status = $1';
+      queryParams.push(status);
+    }
 
     const countResult = await pool.query(
-      `SELECT COUNT(*) FROM submissions s ${statusFilter}`
+      `SELECT COUNT(*) FROM submissions s ${statusFilter}`,
+      queryParams
     );
     const total = parseInt(countResult.rows[0].count, 10);
+
+    const limitParamIndex = queryParams.length + 1;
+    const offsetParamIndex = queryParams.length + 2;
+    const resultQueryParams = [...queryParams, limit, offset];
 
     const result = await pool.query(
       `SELECT s.id, s.user_id, s.language, s.source_code, s.status, s.retry_count,
@@ -135,8 +151,8 @@ export async function submissionRoutes(fastify: FastifyInstance) {
        FROM submissions s
        ${statusFilter}
        ORDER BY s.created_at DESC
-       LIMIT $1 OFFSET $2`,
-      [limit, offset]
+       LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}`,
+      resultQueryParams
     );
 
     const submissions = result.rows.map(row => ({

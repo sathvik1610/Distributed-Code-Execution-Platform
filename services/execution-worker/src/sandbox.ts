@@ -1,11 +1,16 @@
 import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { logger } from '@code-execution/logger';
 import { redisPub } from './redis.js';
 import { StreamChunk } from '@code-execution/contracts';
 
-const TEMP_DIR = '/home/sathvik_pilyanam/Distributed-Code-Execution-Platform/temp';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Resolve the 'temp' folder dynamically relative to the module root (goes up from services/execution-worker/dist or src)
+const TEMP_DIR = process.env.TEMP_DIR || path.resolve(__dirname, '../../../temp');
 const MAX_OUTPUT_SIZE = 64 * 1024; // 64 KB limit to prevent OOM on worker
 
 interface SandboxResult {

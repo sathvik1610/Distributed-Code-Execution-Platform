@@ -1,6 +1,16 @@
-# Distributed Sandboxed Code Execution Platform
+# Distributed Sandboxed Code Execution Platform (Fault-Tolerant Prototype)
 
-A highly resilient, secure, and observable distributed code execution engine designed to execute untrusted user code (Python, JavaScript) in real-time. This system mimics the core backend architecture of competitive programming platforms like LeetCode and HackerRank.
+A fault-tolerant, isolated, and observable distributed code execution engine designed to run untrusted user code (Python, JavaScript) in real-time. This project implements the core backend architecture of competitive programming platforms like LeetCode and HackerRank as an educational prototype.
+
+---
+
+## 💡 What This Project Does
+
+This project is a mini backend for running user-submitted code safely, similar to the execution engine behind platforms like LeetCode.
+
+A user submits Python or JavaScript code. The API stores the request, puts it into a queue, and a background worker runs the code inside a restricted Docker container. While the code runs, the user can see live output through WebSockets. If a worker crashes, a monitor service detects it and puts the unfinished job back into the queue so it is not lost.
+
+The project focuses on backend reliability, sandboxing, distributed job processing, and observability.
 
 ---
 
@@ -57,15 +67,17 @@ The platform is designed as an asynchronous, microservice-based architecture to 
 
 ## 🛠️ Technology Stack & Decisions
 
-### 1. Redis (`ioredis`) — High-Throughput Queueing & Pub/Sub
+### 1. Redis — Queueing, Pub/Sub, and Crash-Safe Job Handoff
 *   **Message Broker:** The API Gateway pushes jobs using `LPUSH`. The workers consume jobs using `BRPOPLPUSH` into a worker-specific processing queue. This provides an atomic, crash-safe transition—if a worker node fails, the job remains in the processing queue rather than being lost.
-*   **Real-time Streaming:** The API Gateway opens a WebSocket per client subscription. Instead of polling the database, it subscribes to `jobs:streams:<jobId>` on Redis. The sandbox writes directly to this Pub/Sub channel, offering sub-millisecond end-to-end delivery of logs.
+*   **Real-time Streaming:** The API Gateway opens a WebSocket per client subscription. Instead of polling the database, it subscribes to `jobs:streams:<jobId>` on Redis. The sandbox writes directly to this Pub/Sub channel, offering low-latency delivery of logs.
 
 ### 2. PostgreSQL — Transactional State Persistence
 *   **State Machine:** Submissions transition through `PENDING -> RUNNING -> COMPLETED/FAILED/TIMEOUT`.
 *   **Optimistic Concurrency Control:** Workers claim jobs using a database-level Compare-And-Swap (CAS) write:
     ```sql
-    UPDATE submissions SET status = 'RUNNING' WHERE id = $2 AND status IN ('PENDING', 'RUNNING');
+    UPDATE submissions
+    SET status = 'RUNNING'
+    WHERE id = $2 AND status = 'PENDING';
     ```
     This guarantees that even if a job is concurrently scheduled, only one worker can process it.
 *   **ACID Transactions:** To prevent split-brain states where results are written but the parent status remains stuck at `RUNNING` due to a mid-process crash, the final status update and results insertion are wrapped in a database transaction (`BEGIN`/`COMMIT`).
@@ -93,11 +105,11 @@ Grafana dashboards are provisioned out-of-the-box (access at `http://localhost:3
 
 ## ⚠️ Known Limitations & Scale Gaps (Interview Trade-offs)
 
-If scaling this system to support enterprise workloads (e.g., 100,000+ concurrent users), these are the known operational bottlenecks and mitigation strategies:
+If scaling this system to support large-scale workloads, these are the known operational bottlenecks and mitigation strategies:
 
 1.  **Docker Boot Latency (100ms - 300ms):**
     *   *Limit:* Spawning a container using `docker run` has high kernel virtualization overhead.
-    *   *Production Fix:* Replace Docker CLI calls with **AWS Firecracker MicroVMs** (which boot in <5ms) or maintain a pool of pre-warmed container sandboxes.
+    *   *Production Fix:* Replace Docker CLI calls with **AWS Firecracker MicroVMs** (which provide lower-latency microVM isolation) or maintain a pool of pre-warmed container sandboxes.
 2.  **Kernel Security Sharing:**
     *   *Limit:* Docker containers share the host kernel. A kernel exploit could allow container breakout.
     *   *Production Fix:* Wrap container runtimes in **gVisor** (by Google) or run **Kata Containers** to provide microVM-level hardware isolation.
@@ -148,3 +160,84 @@ Run the built-in real-time stream validation script:
 ```bash
 node test-ws.js
 ```
+
+---
+
+## 💻 API Specification & Live Demo Walkthrough
+
+### 1. Submit Code for Execution
+Submit user code to be queued and executed asynchronously in an isolated sandbox.
+
+*   **Endpoint:** `POST http://localhost:8000/submissions`
+*   **Request Body:**
+    ```json
+    {
+      "code": "import time\nprint('Starting job...')\ntime.sleep(2)\nprint('Done!')",
+      "language": "python"
+    }
+    ```
+*   **Response:**
+    ```json
+    {
+      "jobId": "07dbfe27-3387-415b-9716-6ca8799a6285",
+      "status": "PENDING"
+    }
+    ```
+
+### 2. Stream Real-Time Console Output
+Listen to standard output and error output in real time as the sandbox container executes the code.
+
+*   **Protocol:** WebSocket
+*   **Endpoint:** `ws://localhost:8000/stream/07dbfe27-3387-415b-9716-6ca8799a6285`
+*   **Message Stream Output Example:**
+    ```json
+    {"type":"stdout","data":"Starting job...\n","timestamp":1779363738000}
+    {"type":"stdout","data":"Done!\n","timestamp":1779363740000}
+    ```
+
+### 3. Fetch Submission Details & Final Metrics
+Fetch persistent database records representing final exit codes, metrics, output, or compilation errors.
+
+*   **Endpoint:** `GET http://localhost:8000/submissions/07dbfe27-3387-415b-9716-6ca8799a6285`
+*   **Response:**
+    ```json
+    {
+      "jobId": "07dbfe27-3387-415b-9716-6ca8799a6285",
+      "language": "python",
+      "sourceCode": "import time\nprint('Starting job...')\ntime.sleep(2)\nprint('Done!')",
+      "status": "COMPLETED",
+      "retryCount": 0,
+      "exitCode": 0,
+      "stdout": "Starting job...\nDone!\n",
+      "stderr": "",
+      "errorMessage": null,
+      "executionTimeMs": 2045,
+      "memoryUsedBytes": null,
+      "createdAt": "2026-05-21T12:00:00.000Z",
+      "updatedAt": "2026-05-21T12:00:02.000Z"
+    }
+    ```
+
+### 4. Paginate & Filter Submissions
+Query the historic database records using pagination and status filters.
+
+*   **Endpoint:** `GET http://localhost:8000/submissions?status=COMPLETED&page=1&limit=10`
+*   **Response:**
+    ```json
+    {
+      "total": 45,
+      "page": 1,
+      "limit": 10,
+      "totalPages": 5,
+      "submissions": [
+        {
+          "jobId": "07dbfe27-3387-415b-9716-6ca8799a6285",
+          "language": "python",
+          "status": "COMPLETED",
+          "retryCount": 0,
+          "createdAt": "2026-05-21T12:00:00.000Z",
+          "updatedAt": "2026-05-21T12:00:02.000Z"
+        }
+      ]
+    }
+    ```

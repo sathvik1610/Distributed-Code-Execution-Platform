@@ -144,18 +144,18 @@ async function processQueue() {
       logger.info({ jobId: job.jobId, retryCount: job.retryCount }, 'Dequeued job for processing');
 
       // ── State-machine transition lock ───────────────────
-      // Only process if the job is in PENDING or RUNNING state.
+      // Only process if the job is in PENDING state.
       // Guards against duplicate processing on retry races.
       const dbResult = await pool.query(
         `UPDATE submissions
          SET status = $1, updated_at = NOW()
-         WHERE id = $2 AND status IN ($3, $4)
+         WHERE id = $2 AND status = $3
          RETURNING status`,
-        [SubmissionStatus.RUNNING, job.jobId, SubmissionStatus.PENDING, SubmissionStatus.RUNNING]
+        [SubmissionStatus.RUNNING, job.jobId, SubmissionStatus.PENDING]
       );
 
       if (dbResult.rows.length === 0) {
-        logger.warn({ jobId: job.jobId }, 'Job already processed or in invalid state. Skipping.');
+        logger.warn({ jobId: job.jobId }, 'Job already claimed, processed, or in invalid state. Skipping.');
         await redis.lrem(processingQueue, 1, rawJob);
         continue;
       }
