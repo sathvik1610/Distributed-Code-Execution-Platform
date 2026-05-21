@@ -1,0 +1,25 @@
+{
+  "name": "@code-execution/system-monitor",
+  "version": "1.0.0",
+  "description": "System Monitor / Reaper — detects dead workers, recovers orphan jobs, manages DLQ",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node --esm src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "type": "module",
+  "dependencies": {
+    "@code-execution/contracts": "*",
+    "@code-execution/logger": "*",
+    "@code-execution/metrics": "*",
+    "dotenv": "^16.4.7",
+    "ioredis": "^5.3.2",
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

@@ -1,0 +1,45 @@
+import 'dotenv/config';
+import fastify from 'fastify';
+import fastifyWebsocket from '@fastify/websocket';
+import { logger } from '@code-execution/logger';
+import { startMetricsServer } from '@code-execution/metrics';
+import { initDb } from './db.js';
+import { submissionRoutes } from './routes/submissions.js';
+
+const app = fastify({
+  logger: false // Use custom Pino logger instead
+});
+
+// Register WebSocket support
+app.register(fastifyWebsocket);
+
+// Register routes
+app.register(submissionRoutes);
+
+// Health check endpoint
+app.get('/health', async () => {
+  return { status: 'OK' };
+});
+
+const PORT = parseInt(process.env.PORT || '8000', 10);
+const METRICS_PORT = parseInt(process.env.METRICS_PORT || '9100', 10);
+
+async function bootstrap() {
+  try {
+    // 1. Initialize databases
+    await initDb();
+
+    // 2. Start Metrics Server
+    await startMetricsServer(METRICS_PORT);
+    logger.info(`Prometheus Metrics server running on port ${METRICS_PORT}`);
+
+    // 3. Start API Gateway
+    await app.listen({ port: PORT, host: '0.0.0.0' });
+    logger.info(`API Gateway running on port ${PORT}`);
+  } catch (err) {
+    logger.error(err, 'Bootstrap failed');
+    process.exit(1);
+  }
+}
+
+bootstrap();

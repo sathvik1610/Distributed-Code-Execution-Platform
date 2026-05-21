@@ -1,0 +1,66 @@
+# ── Node.js ───────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.npm
+.yarn-integrity
+
+# ── TypeScript Build Output ───────────────────────────────────────────────────
+dist/
+build/
+*.js.map
+*.d.ts.map
+
+# ── Environment Variables ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+.env.development
+.env.staging
+.env.production
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+pino-*.log
+
+# ── OS / Editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# Keep Dockerfiles, ignore generated artifacts
+*.dockerignore
+
+# ── Temporary Execution Files ─────────────────────────────────────────────────
+# Worker writes user code to a temp dir before mounting into Docker.
+# These should never be committed.
+temp/sub_*.py
+temp/sub_*.js
+
+# ── Test Artifacts ────────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+
+# ── Grafana Runtime Data ──────────────────────────────────────────────────────
+# Provisioning configs are committed; runtime grafana data is not
+infra/grafana/data/
+
+# ── Prometheus Runtime Data ───────────────────────────────────────────────────
+infra/prometheus/data/
+
+# ── k6 Results ───────────────────────────────────────────────────────────────
+infra/k6-results/
+*.k6.json
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+.cache/
+tmp/

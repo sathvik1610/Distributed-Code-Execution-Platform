@@ -1,0 +1,31 @@
+{
+  "name": "distributed-code-execution-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Distributed Sandboxed Code Execution Platform — Node.js, TypeScript, Redis, PostgreSQL, Docker",
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "build:contracts": "npm run build --workspace=shared/contracts",
+    "build:logger": "npm run build --workspace=shared/logger",
+    "build:metrics": "npm run build --workspace=shared/metrics",
+    "build:shared": "npm run build:contracts && npm run build:logger && npm run build:metrics",
+    "dev:gateway": "npm run dev --workspace=services/api-gateway",
+    "dev:worker": "npm run dev --workspace=services/execution-worker",
+    "dev:monitor": "npm run dev --workspace=services/system-monitor",
+    "infra:up": "docker compose -f infra/docker-compose.yml up -d",
+    "infra:down": "docker compose -f infra/docker-compose.yml down",
+    "infra:logs": "docker compose -f infra/docker-compose.yml logs -f",
+    "test:failure": "bash tests/failure/run-failure-tests.sh",
+    "docker:build:runners": "docker build -t runner-python runners/python && docker build -t runner-javascript runners/javascript"
+  },
+  "workspaces": [
+    "services/*",
+    "shared/*"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.16.0",
+    "rimraf": "^5.0.5",
+    "typescript": "^5.3.3",
+    "ws": "^8.20.1"
+  }
+}
