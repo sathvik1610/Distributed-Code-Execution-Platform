@@ -71,9 +71,11 @@ export async function submissionRoutes(fastify: FastifyInstance) {
   // GET /submissions — paginated list
   fastify.get('/submissions', async (request, reply) => {
     const { page = 1, limit = 10, status } = request.query as { page?: number; limit?: number; status?: string; };
+    const safePage = Math.max(1, Number(page));
+    const safeLimit = Math.min(Math.max(1, Number(limit)), 100); // hard cap at 100
     const validStatuses = Object.values(SubmissionStatus) as string[];
     if (status && !validStatuses.includes(status)) return reply.status(400).send({ error: 'Invalid status filter' });
-    const offset = (page - 1) * limit;
+    const offset = (safePage - 1) * safeLimit;
     const queryParams: any[] = [];
     let statusFilter = '';
     if (status) { statusFilter = 'WHERE s.status = $1'; queryParams.push(status); }
@@ -83,10 +85,10 @@ export async function submissionRoutes(fastify: FastifyInstance) {
     const offsetParamIndex = queryParams.length + 2;
     const result = await pool.query(
       'SELECT s.id, s.user_id, s.language, s.status, s.retry_count, s.created_at, s.updated_at FROM submissions s ' + statusFilter + ' ORDER BY s.created_at DESC LIMIT $' + limitParamIndex + ' OFFSET $' + offsetParamIndex,
-      [...queryParams, limit, offset]
+      [...queryParams, safeLimit, offset]
     );
     return reply.send({
-      total, page, limit, totalPages: Math.ceil(total / limit),
+      total, page: safePage, limit: safeLimit, totalPages: Math.ceil(total / safeLimit),
       submissions: result.rows.map(row => ({ jobId: row.id, userId: row.user_id, language: row.language, status: row.status, retryCount: row.retry_count, createdAt: row.created_at, updatedAt: row.updated_at }))
     });
   });

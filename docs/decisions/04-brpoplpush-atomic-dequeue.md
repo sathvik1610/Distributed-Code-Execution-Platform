@@ -120,6 +120,6 @@ while (shouldRun) {
 
 ## Conclusion
 
-`BRPOPLPUSH` is the correct and only reliable way to implement a distributed job queue in Redis. It is one of the most important engineering decisions in this project and directly enables the crash recovery behavior of the System Monitor.
+`BRPOPLPUSH` is a simple reliable Redis-list pattern for this scope to implement a distributed job queue in Redis. It is one of the most important engineering decisions in this project and directly enables the crash recovery behavior of the System Monitor.
 
 This pattern is used by Bull (the popular Redis job queue library) internally. We implement it directly to demonstrate deep understanding of the mechanism.

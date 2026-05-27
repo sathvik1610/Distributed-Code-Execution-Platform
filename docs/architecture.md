@@ -96,7 +96,7 @@ PENDING  →  RUNNING
 RUNNING  →  COMPLETED | FAILED | TIMEOUT
 ```
 
-Any other transition throws an error. This prevents race conditions in distributed state.
+Transitions are coordinated at the database level by comparing states (e.g. status comparison guards), ensuring only valid status progressions are saved.
 
 ---
 
@@ -115,7 +115,7 @@ The atomic `BRPOPLPUSH` (or `BLMOVE`) command moves a job from `pending` to `pro
 This means:
 - If the worker crashes **before** completing the job, the job is still in `processing:{workerId}`
 - The System Monitor can detect the dead worker's heartbeat expiry
-- The job can be recovered and re-enqueued, without duplicate processing
+- The job can be recovered and re-enqueued, without losing the job; duplicate results are guarded by idempotent inserts
 
 ---
 

@@ -2,6 +2,7 @@
   "name": "distributed-code-execution-platform",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "description": "Distributed Sandboxed Code Execution Platform — Node.js, TypeScript, Redis, PostgreSQL, Docker",
   "scripts": {
     "build": "npm run build --workspaces --if-present",

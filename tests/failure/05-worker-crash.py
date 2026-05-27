@@ -42,17 +42,25 @@ BASE_URL = "http://localhost:8000"
 
 def submit_job(code, language="python"):
     payload = json.dumps({"code": code, "language": language}).encode()
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("API_KEY", "test-api-key")
+    if api_key:
+        headers["X-API-Key"] = api_key
     req = urllib.request.Request(
         f"{BASE_URL}/submissions",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST"
     )
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read())
 
 def get_job_status(job_id):
-    req = urllib.request.Request(f"{BASE_URL}/submissions/{job_id}")
+    headers = {}
+    api_key = os.environ.get("API_KEY", "test-api-key")
+    if api_key:
+        headers["X-API-Key"] = api_key
+    req = urllib.request.Request(f"{BASE_URL}/submissions/{job_id}", headers=headers)
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read())
 

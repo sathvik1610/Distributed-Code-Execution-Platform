@@ -23,10 +23,6 @@ export const queueDepth = new client.Gauge({
   }
 });
 
-export const dequeueLatency = new client.Histogram({
-  name: 'code_execution_dequeue_latency_ms',
-  help: 'Latency of atomic dequeue operation in milliseconds'
-});
 
 export const activeWorkers = new client.Gauge({
   name: 'code_execution_active_workers',
@@ -45,11 +41,6 @@ export const executionDuration = new client.Histogram({
   labelNames: ['language', 'status']
 });
 
-export const executionMemory = new client.Gauge({
-  name: 'code_execution_memory_used_bytes',
-  help: 'Memory used by sandbox container in bytes',
-  labelNames: ['language']
-});
 
 export const activeWebSockets = new client.Gauge({
   name: 'code_execution_websocket_connections_active',
@@ -75,6 +66,19 @@ export const deadLetterJobs = new client.Counter({
 export const rateLimitHits = new client.Counter({
   name: 'code_execution_rate_limit_hits_total',
   help: 'Total rate limit hits'
+});
+
+/**
+ * Time a job spent in the queue before a worker picked it up.
+ * Computed as: Date.now() (at dequeue) - job.submittedAt (at enqueue).
+ * Distinct from execution_duration_ms — use this to detect worker starvation.
+ * If this spikes, add more workers. If execution_duration_ms spikes, the code is slow.
+ */
+export const queueWaitTime = new client.Histogram({
+  name: 'code_execution_queue_wait_ms',
+  help: 'Time a job spent waiting in the queue before a worker picked it up (ms)',
+  labelNames: ['language'],
+  buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000]
 });
 
 /**

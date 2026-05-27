@@ -1,6 +1,13 @@
 import http from 'http';
 
 const API_URL = 'http://localhost:8000/submissions';
+const API_KEY = process.env.API_KEY || '';
+
+if (!API_KEY) {
+  console.warn('⚠️  Warning: API_KEY env var not set. Requests will be rejected by the gateway.');
+  console.warn('   Run: export API_KEY=your-secret-key');
+  console.warn('');
+}
 
 // 3 Types of payloads to test different system boundaries
 const payloads = [
@@ -42,7 +49,8 @@ function submitJob(payload) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
+        'Content-Length': Buffer.byteLength(postData),
+        'X-API-Key': API_KEY
       }
     }, (res) => {
       let body = '';

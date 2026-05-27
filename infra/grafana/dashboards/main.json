@@ -264,25 +264,6 @@
       ]
     },
     {
-      "id": 11,
-      "title": "Dequeue Latency (P99)",
-      "type": "timeseries",
-      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ms",
-          "color": { "mode": "palette-classic" }
-        }
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.99, sum(rate(code_execution_dequeue_latency_ms_bucket[1m])) by (le))",
-          "legendFormat": "P99 Dequeue Latency",
-          "refId": "A"
-        }
-      ]
-    },
-    {
       "id": 12,
       "title": "DLQ & Recovery Spikes",
       "type": "timeseries",
@@ -303,6 +284,36 @@
           "expr": "sum(rate(code_execution_dead_worker_recoveries_total[1m]))",
           "legendFormat": "Recovery Rate",
           "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Queue Wait Time (P50/P90/P99)",
+      "description": "Time from job submission to worker pickup. A spike here means worker starvation — add more workers. Distinct from execution duration, which measures time inside the Docker sandbox.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(code_execution_queue_wait_ms_bucket[2m])) by (le, language))",
+          "legendFormat": "P50 — {{language}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum(rate(code_execution_queue_wait_ms_bucket[2m])) by (le, language))",
+          "legendFormat": "P90 — {{language}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(code_execution_queue_wait_ms_bucket[2m])) by (le, language))",
+          "legendFormat": "P99 — {{language}}",
+          "refId": "C"
         }
       ]
     }

@@ -5,7 +5,7 @@ import { redis, redisPub } from './redis.js';
 import { logger } from '@code-execution/logger';
 import {
   startMetricsServer, activeWorkers, workerJobCounter,
-  executionDuration, deadLetterJobs
+  executionDuration, deadLetterJobs, queueWaitTime
 } from '@code-execution/metrics';
 import {
   SubmissionStatus, QueuePayload, DLQPayload,
@@ -167,6 +167,13 @@ async function processQueue() {
         await redis.lrem(processingQueue, 1, rawJob);
         continue;
       }
+
+      // ── Record queue wait time ──────────────────────────
+      // Time from client submission to worker pickup. Distinct from execution
+      // time — a spike here means worker starvation (add more workers).
+      const queueWaitMs = Date.now() - Date.parse(job.submittedAt);
+      queueWaitTime.observe({ language: job.language }, queueWaitMs);
+      logger.info({ jobId: job.jobId, queueWaitMs }, 'Queue wait recorded');
 
       // ── Execute in Docker sandbox ───────────────────────
       const result = await runInSandbox(job.jobId, job.code, job.language);

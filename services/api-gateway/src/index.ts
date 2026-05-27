@@ -50,10 +50,14 @@ subscriber.on('pmessage', (pattern, channel, message) => {
 });
 
 
-// Rate Limiting: 30 submissions per minute per IP
+// Rate Limiting: 30 submissions per minute per IP.
+// Counters live in Redis (not in-process memory) so limits are enforced
+// correctly across multiple gateway instances behind a load balancer.
+// @fastify/rate-limit uses atomic INCR + EXPIRE internally — no extra packages needed.
 await app.register(fastifyRateLimit, {
   max: 30,
   timeWindow: '1 minute',
+  redis: redis,
   keyGenerator: (request) => request.ip,
   errorResponseBuilder: (_request, context) => {
     rateLimitHits.inc();
@@ -68,13 +72,16 @@ await app.register(fastifyRateLimit, {
 // Auth Hook: require X-API-Key on all /submissions and /dlq routes
 const API_KEY = process.env.API_KEY;
 if (!API_KEY) {
-  logger.warn('API_KEY env var not set — auth is DISABLED. Set API_KEY in .env for production.');
+  logger.error('API_KEY environment variable not set! API Gateway auth is securely locked to FAIL-SECURE. All protected endpoints will reject requests.');
 }
 
 app.addHook('onRequest', async (request, reply) => {
   const url = request.url;
   if (url === '/health' || url.startsWith('/stream/')) return;
-  if (!API_KEY) return;
+  if (!API_KEY) {
+    logger.error({ ip: request.ip, url }, 'Blocked request to protected route because API_KEY is not configured on the server.');
+    return reply.status(500).send({ error: 'Internal Server Error', message: 'API Gateway is securely locked. API_KEY environment variable is not configured on the server.' });
+  }
   const provided = request.headers['x-api-key'];
   if (provided !== API_KEY) {
     logger.warn({ ip: request.ip, url }, 'Unauthorized request — invalid or missing X-API-Key');

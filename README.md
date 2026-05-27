@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sathvik-pilyanam/Distributed-Code-Execution-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/sathvik-pilyanam/Distributed-Code-Execution-Platform/actions/workflows/ci.yml)
 
-A distributed, sandboxed code execution system built with **Node.js**, **TypeScript**, **Redis**, **PostgreSQL**, and **Docker**. Accepts code submissions via HTTP, executes them in isolated containers with strict security policies, streams real-time output over WebSockets, and recovers from worker crashes automatically.
+A queue-based multi-worker code execution system built with **Node.js**, **TypeScript**, **Redis**, **PostgreSQL**, and **Docker**. Accepts code submissions via HTTP, executes them in isolated containers with Docker runtime restrictions suitable for a learning prototype, streams real-time output over WebSockets, and recovers from worker crashes automatically.
 
 ---
 
@@ -39,7 +39,7 @@ Client
                │  stdout/stderr → Redis Pub/Sub: jobs:streams:<jobId>
                │  ◄── API Gateway global subscriber fans out to clients
                ▼
-         PostgreSQL :5432  (ACID state machine + results)
+         PostgreSQL :5432  (PostgreSQL-backed submission state and transactional result writes)
 
 ┌─────────────────────────────────┐
 │        System Monitor            │  :9102 Prometheus
@@ -57,7 +57,7 @@ Client
 |---|---|
 | **`BRPOPLPUSH`** instead of BLPOP | Jobs land in a per-worker processing queue atomically. If the worker dies, the System Monitor reads the queue and recovers the job. BLPOP would lose it. |
 | **`BEGIN/COMMIT`** wrapping results + status | Prevents split-brain: without a transaction, a crash between the two writes leaves `submissions.status = RUNNING` forever while `submission_results` already has output. |
-| **`ON CONFLICT DO NOTHING`** on result insert | Idempotency: if a worker crashes after writing results but before removing the job from its queue, a retry re-executes the insert safely. |
+| **`ON CONFLICT DO NOTHING`** on result insert | Idempotency: if a worker crashes after writing results but before removing the job from its queue, a retry may re-execute the job; duplicate result rows are ignored. |
 | **Shared Redis Subscriber with Pattern Subscription** | Avoids creating a new Redis subscriber client per WebSocket connection. A single global Redis subscriber subscribes to `jobs:streams:*` on boot to prevent file descriptor exhaustion under high connection loads. |
 | **`child_process.spawn`** not exec | exec buffers all output in memory. spawn streams chunks — required for real-time output and to avoid OOM on large outputs. |
 | **Shared WebSocket Streams Map (`activeStreams`)** | The global subscriber intercepting message events uses an in-memory `activeStreams` map (`Map<string, Set<WebSocket>>`) to fan out messages directly to the correct client WebSockets. |
@@ -124,7 +124,7 @@ These are intentional tradeoffs, not unknown bugs:
 | Limitation | Production Fix |
 |---|---|
 | Docker boot latency (100–300ms/job) | Firecracker MicroVMs or pre-warmed container pools |
-| **Redis is a single node** | Redis Sentinel or ElastiCache with AOF persistence. If Redis goes down, the queue, pub/sub, and heartbeats all fail simultaneously. Worker reconnection logic is in place; the queue recovers once Redis is back. |
+| **Redis is a single node** | Redis Sentinel or ElastiCache with AOF persistence. If Redis goes down, the queue, pub/sub, and heartbeats all fail simultaneously. Worker reconnection logic is in place, but in-memory queue state is lost — any pending jobs not yet persisted to Postgres must be re-submitted. |
 | Shared host kernel | gVisor or Kata Containers for hardware-level isolation |
 | No distributed tracing | OpenTelemetry across gateway → worker → DB |
 | No Grafana alerting rules | Alertmanager with on-call pages for DLQ spikes and p99 latency thresholds |
@@ -152,7 +152,8 @@ npm run build:shared && npm run build
 # 3. Build sandbox runner images
 npm run docker:build:runners
 
-# 4. Start everything (infra + all 3 services)
+# 4. Configure API Key & Start everything (infra + all 3 services)
+export API_KEY=test-api-key
 npm run start:all
 
 # To run 3 parallel workers (demonstrates horizontal scaling):
@@ -220,7 +221,7 @@ Receives `StreamChunk` messages. Connection closes automatically on `EXECUTION_C
 GET /submissions/<jobId>
 X-API-Key: <your-key>
 ```
-Returns full result including `errorCategory`, `memoryUsedBytes`, `executionTimeMs`.
+Returns full result including `errorCategory`, `memoryUsedBytes` (collected via peak `docker stats` sampling; may return `null` for extremely fast/ephemeral executions), and `executionTimeMs`.
 
 ### List Submissions
 ```
@@ -267,9 +268,12 @@ npm run start:all
 
 ---
 
-### 3. Verification Scenario 1: Real-Time WebSocket Streaming
+### 3. Verification Scenario 1: Real-Time WebSocket Streaming & Custom CLI Execution
+
+#### A. Basic Streaming Test
 Submit a long-running python script and watch standard output stream back to the client in real-time, exactly 1 second apart, with a clean connection closure:
 ```bash
+export API_KEY=test-api-key
 node test-ws.js
 ```
 
@@ -285,11 +289,25 @@ WS Connection opened successfully
 WS Connection closed. Code: 1000, Reason: Execution complete
 ```
 
+#### B. Dynamic CLI File Execution
+You can also run **any custom Python or JavaScript file** from your local filesystem through the platform's sandboxes using our dynamic CLI wrapper `run-file.js` (which auto-detects language based on extension):
+
+```bash
+export API_KEY=test-api-key
+
+# Run a Python script
+node run-file.js sample.py
+
+# Run a JavaScript script
+node run-file.js sample.js
+```
+
 ---
 
 ### 4. Verification Scenario 2: Automated Failure Containment
 Verify that the sandboxes contain malicious behavior (Infinite Loops, Fork Bombs, Out of Memory triggers, and Infinite Output attacks) successfully:
 ```bash
+export API_KEY=test-api-key
 npm run test:failure
 ```
 **Expected Results:**
@@ -301,7 +319,7 @@ npm run test:failure
 ---
 
 ### 5. Verification Scenario 3: Manual Worker Crash & Resiliency Recovery
-This manual scenario tests the fault tolerance of the **System Monitor** and its ability to self-heal orphaned jobs when worker processes crash:
+This manual scenario tests the fault tolerance of the **System Monitor** and its ability to recover orphaned jobs when worker processes crash:
 
 1. **Terminal A (Watcher):** Watch the System Monitor logs:
    ```bash
@@ -336,15 +354,46 @@ This manual scenario tests the fault tolerance of the **System Monitor** and its
 
 Navigate to **`http://localhost:3000`** in your browser to view Grafana.
 - **Credentials:** `admin` / `admin`
-- Under **Dashboards**, open the pre-loaded **Distributed Code Execution Platform** dashboard to view real-time API latency percentiles, worker CPU/memory performance, and error metrics.
+- Under **Dashboards**, open the pre-loaded **Distributed Code Execution Platform** dashboard to view real-time API latency percentiles, worker CPU usage, execution error rates, and queue depth metrics. Memory metrics are best-effort (sampled via `docker stats`; may be absent for very short-lived containers).
 
 ---
 
 ## Horizontal Scaling
 
-Workers are completely stateless. To simulate and run multiple workers in parallel:
+Workers keep no durable local state; they depend on Redis/Postgres/Docker socket. To simulate and run multiple workers in parallel:
 ```bash
 # Spin up 3 parallel workers running concurrently
 npm run start:all:scaled
 ```
 The System Monitor reaper automatically scales and handles heartbeat/dead-worker detection across all active instances.
+
+---
+
+## Known Architectural Tradeoffs & Production Path
+
+This system is built as a **production-style learning prototype**. It prioritizes operational transparency, ease of demo, and idiomatic distributed patterns over complex cloud infrastructure. In a real-world enterprise system, the following limitations would be addressed:
+
+### 1. At-Least-Once Delivery vs. Exactly-Once
+- **The Limit:** Because Redis and PostgreSQL are heterogeneous datastores, they do not share an atomic transaction boundary. A worker crash after writing execution results but before removing a job from the processing queue will cause a retry.
+- **Our Defense:** The system relies on **at-least-once delivery**. Duplicate executions are made safe via **idempotent database result writes** (`ON CONFLICT DO NOTHING`) and **Reaper DB status pre-checks** that skip recovering jobs already marked as complete in Postgres.
+- **Production Path:** Implement a **Transactional Outbox Pattern** or a **DB-to-Queue reconciler** to guarantee strict eventual consistency.
+
+### 2. Redis-Backed Rate Limiting
+- **Implemented:** The rate limiter uses Redis as a shared counter store (`@fastify/rate-limit` with an ioredis client). Limits are enforced correctly across multiple gateway instances — each request increments an atomic Redis counter with a 1-minute TTL.
+- **Remaining gap:** The counter uses a fixed window (not sliding window). A client can send 30 requests at second 59 and 30 more at second 61 for a burst of 60 in 2 seconds. A sliding window (Redis sorted sets) eliminates this but is not implemented.
+
+### 3. Docker Socket Security & Sibling Containers
+- **The Limit:** The worker mounts `/var/run/docker.sock` to spawn sandboxes. This grants the worker root-equivalent privileges on the host system. Furthermore, local directory mounts restrict the worker pool to a single host VM.
+- **Production Path:** Replace the local Docker spawner with a container orchestration API (e.g. AWS ECS Fargate or Kubernetes Job APIs) or VMs microvisors like **AWS Firecracker** to ensure strict sandbox-to-host isolation.
+
+### 4. Cold-Start Sandbox Latency
+- **The Limit:** Creating a brand new container (`docker run --rm`) from scratch for every execution adds 200ms–500ms of startup latency.
+- **Production Path:** Implement a **pre-warmed container pool** that keeps runner instances running in a paused state, resuming them instantly (<5ms) when a job arrives.
+
+### 5. Best-Effort Peak Memory Collection
+- **The Limit:** Sandboxes are ephemeral. We poll `docker stats` immediately after execution ends to read peak memory usage, but extremely fast/short executions can terminate before a metrics tick, returning `null`.
+- **Production Path:** Read cgroup memory allocation statistics directly from `/sys/fs/cgroup/memory` or run containers under a lightweight daemon that reports precise runtime telemetry.
+
+### 6. WebSocket Streaming Limitations
+- **Live-only:** `/stream/:jobId` streams output in real time using Redis pub/sub. Clients that connect after execution completes receive no output — there is no replay buffer. Connect before or during execution.
+- **Unauthenticated by design:** The stream endpoint does not require `X-API-Key`. Job IDs are random UUIDs so enumeration is infeasible, but anyone who obtains a job ID can watch its output stream. In production, short-lived signed tokens (HMAC of jobId) should gate access.

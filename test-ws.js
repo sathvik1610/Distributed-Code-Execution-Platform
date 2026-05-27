@@ -3,25 +3,31 @@ import http from 'http';
 
 // 1. Submit a job with delays to api-gateway
 const payload = JSON.stringify({
-  code: `import time
-print("Chunk 1: Starting computation...")
-time.sleep(1)
-print("Chunk 2: Middle of execution...")
-time.sleep(1)
-print("Chunk 3: Execution finished.")
+  code: `
+console.log("Running in Node.js container!");
+const items = [1, 2, 3, 4, 5];
+const doubled = items.map(x => x * 2);
+console.log("Result:", doubled);
 `,
-  language: 'python'
+  language: 'javascript'
+
+
 });
+
+const headers = {
+  'Content-Type': 'application/json',
+  'Content-Length': Buffer.byteLength(payload)
+};
+if (process.env.API_KEY) {
+  headers['X-API-Key'] = process.env.API_KEY;
+}
 
 const req = http.request({
   hostname: 'localhost',
   port: 8000,
   path: '/submissions',
   method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(payload)
-  }
+  headers
 }, (res) => {
   let body = '';
   res.on('data', chunk => body += chunk);

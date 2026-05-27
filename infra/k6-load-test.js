@@ -32,6 +32,11 @@ const completionLatency = new Trend('completion_latency_ms', true);
 // ── Configuration ──────────────────────────────────────────────────────────
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8000';
+const API_KEY = __ENV.API_KEY || '';
+
+if (!API_KEY) {
+  console.warn('Warning: API_KEY not set. Set it with: k6 run -e API_KEY=your-secret-key infra/k6-load-test.js');
+}
 
 // ── Test Scenarios ─────────────────────────────────────────────────────────
 
@@ -105,7 +110,8 @@ export default function testCodeSubmission() {
 
   const headers = {
     'Content-Type': 'application/json',
-    'Accept': 'application/json'
+    'Accept': 'application/json',
+    'X-API-Key': API_KEY
   };
 
   // ── Submit Job ─────────────────────────────────────────────────────────
@@ -177,7 +183,7 @@ export function testWebSocketStreaming() {
   // Submit a job with delays so streaming has something to send
   const code = `import time\nprint("Stream Start")\nfor i in range(5):\n    time.sleep(0.5)\n    print(f"Chunk {i+1}")\nprint("Stream End")`;
   const payload = JSON.stringify({ code, language: 'python' });
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json', 'X-API-Key': API_KEY };
 
   const submitRes = http.post(`${BASE_URL}/submissions`, payload, { headers });
   if (submitRes.status !== 201) {
@@ -232,7 +238,7 @@ export function testWebSocketStreaming() {
 export function testRetryStorm() {
   const badCode = `raise Exception("Intentional failure for retry testing")`;
   const payload = JSON.stringify({ code: badCode, language: 'python' });
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json', 'X-API-Key': API_KEY };
 
   const submitRes = http.post(`${BASE_URL}/submissions`, payload, { headers });
   check(submitRes, { 'retry_storm: submission accepted': (r) => r.status === 201 });

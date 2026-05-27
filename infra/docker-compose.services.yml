@@ -40,7 +40,7 @@ services:
       NODE_ENV: "production"
       LOG_LEVEL: "info"
       # Set API_KEY to enable auth. Requests without X-API-Key header will get 401.
-      # API_KEY: "your-secret-key-here"
+      API_KEY: "test-api-key"
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,8 +60,9 @@ services:
       METRICS_PORT: "9101"
       DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/code_execution"
       REDIS_URL: "redis://redis:6379"
-      # Temp dir mounted from host so Docker-in-Docker can access sandbox code files
-      TEMP_DIR: "/home/sathvik_pilyanam/Distributed-Code-Execution-Platform/temp"
+      # Temp dir: uses ${PWD} so the path resolves correctly on any machine.
+      # Workers write user code here before mounting it into sandbox containers.
+      TEMP_DIR: "${PWD}/temp"
       NODE_ENV: "production"
       LOG_LEVEL: "info"
     volumes:
@@ -71,7 +72,7 @@ services:
       # a rootless container runtime. The alternative to --privileged here is running
       # the worker directly on the host with: sudo usermod -aG docker $USER (then re-login).
       - /var/run/docker.sock:/var/run/docker.sock
-      - /home/sathvik_pilyanam/Distributed-Code-Execution-Platform/temp:/home/sathvik_pilyanam/Distributed-Code-Execution-Platform/temp
+      - ${PWD}/temp:${PWD}/temp
     depends_on:
       postgres:
         condition: service_healthy

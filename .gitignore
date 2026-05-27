@@ -35,6 +35,9 @@ Thumbs.db
 *.swp
 *.swo
 *~
+*.bak
+*.old
+*.orig
 
 # ── Docker ────────────────────────────────────────────────────────────────────
 # Keep Dockerfiles, ignore generated artifacts
@@ -43,8 +46,7 @@ Thumbs.db
 # ── Temporary Execution Files ─────────────────────────────────────────────────
 # Worker writes user code to a temp dir before mounting into Docker.
 # These should never be committed.
-temp/sub_*.py
-temp/sub_*.js
+temp/
 
 # ── Test Artifacts ────────────────────────────────────────────────────────────
 coverage/
