@@ -132,8 +132,10 @@ while True:
             print(f"PASS: WebSocket received {len(chunks_received)} streaming chunks without crashing")
         else:
             print("NOTE: WebSocket chunks not verified (websocket-client may not be installed)")
+    elif final["status"] == "FAILED" and "Output limit exceeded" in (final.get("errorMessage") or ""):
+        print("PASS: Infinite output was killed by output limit cap")
     else:
-        print(f"FAIL: Expected TIMEOUT, got {final['status']}")
+        print(f"FAIL: Expected TIMEOUT or FAILED (output cap), got {final['status']} (Message: {final.get('errorMessage')})")
         sys.exit(1)
 
 if __name__ == "__main__":

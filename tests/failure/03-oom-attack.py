@@ -51,9 +51,8 @@ def main():
     code = """
 # Allocate 1MB chunks until OOM kills the container
 x = []
-chunk = ' ' * 1024 * 1024  # 1MB per chunk
 while True:
-    x.append(chunk)
+    x.append(bytearray(1024 * 1024))
     print(f"Allocated {len(x)}MB so far...")
 """
 

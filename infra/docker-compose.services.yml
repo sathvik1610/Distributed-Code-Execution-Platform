@@ -1,0 +1,110 @@
+# docker-compose.services.yml
+# Extends the infrastructure compose file with all three Node.js microservices.
+# This enables a single-command startup for demos and CI.
+#
+# PREREQUISITES:
+#   1. Build shared packages and services first:
+#      npm run build:shared && npm run build
+#   2. Build sandbox runner images:
+#      npm run docker:build:runners
+#
+# USAGE:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml up -d
+#
+# HORIZONTAL SCALING (demonstrates multi-worker design):
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml \
+#     up -d --scale execution-worker=3
+#
+# Each worker instance gets a unique workerId (UUID) and its own processing queue.
+# The System Monitor reaper detects dead workers across all instances.
+
+version: '3.8'
+
+services:
+
+  # ── API Gateway ─────────────────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: ..
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: execution_api_gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "9100:9100"
+    environment:
+      PORT: "8000"
+      METRICS_PORT: "9100"
+      DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/code_execution"
+      REDIS_URL: "redis://redis:6379"
+      NODE_ENV: "production"
+      LOG_LEVEL: "info"
+      # Set API_KEY to enable auth. Requests without X-API-Key header will get 401.
+      # API_KEY: "your-secret-key-here"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - execution_net
+
+  # ── Execution Worker ────────────────────────────────────────────────────
+  # Run multiple replicas to demonstrate horizontal scaling:
+  #   --scale execution-worker=3
+  # Each instance gets a unique workerId UUID at startup.
+  execution-worker:
+    build:
+      context: ..
+      dockerfile: services/execution-worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      METRICS_PORT: "9101"
+      DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/code_execution"
+      REDIS_URL: "redis://redis:6379"
+      # Temp dir mounted from host so Docker-in-Docker can access sandbox code files
+      TEMP_DIR: "/app/temp"
+      NODE_ENV: "production"
+      LOG_LEVEL: "info"
+    volumes:
+      # Docker socket mount — required for the worker to spawn sandbox containers.
+      # SECURITY NOTE: Mounting /var/run/docker.sock gives this container root-equivalent
+      # access to the host. In production, use a dedicated Docker daemon (DinD) or
+      # a rootless container runtime. The alternative to --privileged here is running
+      # the worker directly on the host with: sudo usermod -aG docker $USER (then re-login).
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../temp:/app/temp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - execution_net
+
+  # ── System Monitor ──────────────────────────────────────────────────────
+  system-monitor:
+    build:
+      context: ..
+      dockerfile: services/system-monitor/Dockerfile
+    container_name: execution_system_monitor
+    restart: unless-stopped
+    ports:
+      - "9102:9102"
+    environment:
+      METRICS_PORT: "9102"
+      DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/code_execution"
+      REDIS_URL: "redis://redis:6379"
+      NODE_ENV: "production"
+      LOG_LEVEL: "info"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - execution_net
+
+networks:
+  execution_net:
+    driver: bridge

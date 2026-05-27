@@ -101,10 +101,10 @@ async function sendToDLQ(job: QueuePayload, reason: string): Promise<void> {
 
   // Idempotently insert a failure result record
   await pool.query(
-    `INSERT INTO submission_results (job_id, exit_code, stdout, stderr, error_message)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO submission_results (job_id, exit_code, stdout, stderr, error_message, error_category)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (job_id) DO NOTHING`,
-    [job.jobId, null, '', '', `Dead Letter: ${reason}`]
+    [job.jobId, null, '', '', `Dead Letter: ${reason}`, 'WORKER_CRASH']
   );
 
   logger.error({ jobId: job.jobId, retryCount: job.retryCount, reason }, 'Orphan job sent to DLQ');
@@ -139,6 +139,20 @@ async function recoverJobsFromDeadWorker(deadWorkerId: string): Promise<void> {
       job = JSON.parse(rawJob) as QueuePayload;
     } catch (parseErr) {
       logger.error({ parseErr, rawJob }, 'Failed to parse orphan job payload. Skipping.');
+      continue;
+    }
+
+    const dbResult = await pool.query(
+      'SELECT status FROM submissions WHERE id = $1',
+      [job.jobId]
+    );
+    const currentStatus = dbResult.rows[0]?.status;
+
+    if (currentStatus === 'COMPLETED' || currentStatus === 'FAILED') {
+      logger.info(
+        { jobId: job.jobId, currentStatus },
+        'Job already terminal in DB — skipping requeue, removing from dead worker queue'
+      );
       continue;
     }
 

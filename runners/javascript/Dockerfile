@@ -1,16 +1,18 @@
-FROM node:20-alpine
+# Image pinned to a specific digest to prevent supply-chain drift.
+# To update: docker pull node:20-alpine && docker inspect node:20-alpine --format '{{index .RepoDigests 0}}'
+# Then replace the digest below with the new value.
+FROM node:20-alpine@sha256:2d07db07a2df6830718c2a5e08a36d6c5b1bb37e61f1bd784e8fc1a4dc8fb659
 
 # Create a non-root runner user with UID 2000 and GID 2000
-RUN addgroup -g 2000 runner && adduser -u 2000 -G runner -s /bin/sh -D runner
+# -s /sbin/nologin prevents interactive shell login
+RUN addgroup -g 2000 runner && adduser -u 2000 -G runner -s /sbin/nologin -D runner
 
 # Set working directory
 WORKDIR /app
-
-# Change ownership
 RUN chown runner:runner /app
 
-# Switch to runner
+# Drop to non-root user
 USER runner
 
-# Run the node app
+# The sandbox mounts code at /app/code.js via -v
 CMD ["node", "/app/code.js"]

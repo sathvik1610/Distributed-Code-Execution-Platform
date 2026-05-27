@@ -15,8 +15,12 @@
     "infra:up": "docker compose -f infra/docker-compose.yml up -d",
     "infra:down": "docker compose -f infra/docker-compose.yml down",
     "infra:logs": "docker compose -f infra/docker-compose.yml logs -f",
+    "start:all": "docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml up -d",
+    "start:all:scaled": "docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml up -d --scale execution-worker=3",
+    "stop:all": "docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml down",
     "test:failure": "bash tests/failure/run-failure-tests.sh",
-    "docker:build:runners": "docker build -t runner-python runners/python && docker build -t runner-javascript runners/javascript"
+    "docker:build:runners": "docker build -t runner-python runners/python && docker build -t runner-javascript runners/javascript",
+    "typecheck": "tsc --noEmit --project tsconfig.json"
   },
   "workspaces": [
     "services/*",

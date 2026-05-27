@@ -1,21 +1,88 @@
 import 'dotenv/config';
 import fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
+import fastifyRateLimit from '@fastify/rate-limit';
 import { logger } from '@code-execution/logger';
-import { startMetricsServer } from '@code-execution/metrics';
+import { startMetricsServer, rateLimitHits } from '@code-execution/metrics';
 import { initDb } from './db.js';
 import { submissionRoutes } from './routes/submissions.js';
 import { redis } from './redis.js';
 import { QUEUE_KEYS } from '@code-execution/contracts';
+import { activeStreams } from './streams.js';
 
 const app = fastify({
   logger: false // Use custom Pino logger instead
 });
 
-// Register WebSocket support
-app.register(fastifyWebsocket);
+// Single global Redis subscriber connection duplicated from primary client
+const subscriber = redis.duplicate();
 
-// Register routes
+subscriber.on('error', (err) => {
+  logger.error(err, 'Redis global subscriber error');
+});
+
+subscriber.on('pmessage', (pattern, channel, message) => {
+  const jobId = channel.replace('jobs:streams:', '');
+  const sockets = activeStreams.get(jobId);
+  if (sockets) {
+    let isComplete = false;
+    try {
+      const chunk = JSON.parse(message);
+      if (chunk.type === 'system' && chunk.data === 'EXECUTION_COMPLETE') {
+        isComplete = true;
+      }
+    } catch { /* ignore non-JSON messages */ }
+
+    for (const socket of sockets) {
+      if (socket.readyState === 1) { // WebSocket.OPEN
+        socket.send(message);
+        if (isComplete) {
+          logger.info({ jobId }, 'Execution complete — closing WebSocket');
+          setTimeout(() => {
+            if (socket.readyState === 1) {
+              socket.close(1000, 'Execution complete');
+            }
+          }, 100);
+        }
+      }
+    }
+  }
+});
+
+
+// Rate Limiting: 30 submissions per minute per IP
+await app.register(fastifyRateLimit, {
+  max: 30,
+  timeWindow: '1 minute',
+  keyGenerator: (request) => request.ip,
+  errorResponseBuilder: (_request, context) => {
+    rateLimitHits.inc();
+    return {
+      statusCode: 429,
+      error: 'Too Many Requests',
+      message: 'Rate limit exceeded. Max ' + context.max + ' requests per ' + context.after + '.'
+    };
+  }
+});
+
+// Auth Hook: require X-API-Key on all /submissions and /dlq routes
+const API_KEY = process.env.API_KEY;
+if (!API_KEY) {
+  logger.warn('API_KEY env var not set — auth is DISABLED. Set API_KEY in .env for production.');
+}
+
+app.addHook('onRequest', async (request, reply) => {
+  const url = request.url;
+  if (url === '/health' || url.startsWith('/stream/')) return;
+  if (!API_KEY) return;
+  const provided = request.headers['x-api-key'];
+  if (provided !== API_KEY) {
+    logger.warn({ ip: request.ip, url }, 'Unauthorized request — invalid or missing X-API-Key');
+    return reply.status(401).send({ error: 'Unauthorized', message: 'Valid X-API-Key header required.' });
+  }
+});
+
+app.register(fastifyWebsocket);
 app.register(submissionRoutes);
 
 const PORT = parseInt(process.env.PORT || '8000', 10);
@@ -23,20 +90,20 @@ const METRICS_PORT = parseInt(process.env.METRICS_PORT || '9100', 10);
 
 async function bootstrap() {
   try {
-    // 1. Initialize databases
     await initDb();
-
-    // 2. Start Metrics Server
     await startMetricsServer(METRICS_PORT, {
       queueDepthProvider: async () => {
         return await redis.llen(QUEUE_KEYS.PENDING);
       }
     });
-    logger.info(`Prometheus Metrics server running on port ${METRICS_PORT}`);
+    logger.info('Prometheus Metrics server running on port ' + METRICS_PORT);
+    
+    // Subscribe to all stream key events globally
+    await subscriber.psubscribe('jobs:streams:*');
+    logger.info('Global Redis subscriber psubscribe active');
 
-    // 3. Start API Gateway
     await app.listen({ port: PORT, host: '0.0.0.0' });
-    logger.info(`API Gateway running on port ${PORT}`);
+    logger.info('API Gateway running on port ' + PORT);
   } catch (err) {
     logger.error(err, 'Bootstrap failed');
     process.exit(1);

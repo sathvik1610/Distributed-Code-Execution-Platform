@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 1: Type-check and build all workspaces
+  # Catches TypeScript errors and broken imports before they hit production.
+  # ──────────────────────────────────────────────────────────────────────────
+  build:
+    name: Type Check & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages (contracts, logger, metrics)
+        run: npm run build:shared
+
+      - name: Build all microservices
+        run: npm run build
+
+      - name: Type-check root workspace
+        run: |
+          # Verify no TypeScript errors across the repo
+          npx tsc --noEmit --project services/api-gateway/tsconfig.json
+          npx tsc --noEmit --project services/execution-worker/tsconfig.json
+          npx tsc --noEmit --project services/system-monitor/tsconfig.json
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-artifacts
+          path: |
+            shared/contracts/dist
+            shared/logger/dist
+            shared/metrics/dist
+            services/api-gateway/dist
+            services/execution-worker/dist
+            services/system-monitor/dist
+          retention-days: 1
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 2: Sandbox security & failure tests
+  # Runs against real Docker + Redis + Postgres service containers.
+  # Tests the 5 adversarial scenarios: infinite loop, fork bomb, OOM, 
+  # infinite output, and worker crash recovery.
+  # ──────────────────────────────────────────────────────────────────────────
+  failure-tests:
+    name: Failure & Security Tests
+    runs-on: ubuntu-latest
+    needs: build
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: code_execution
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-artifacts
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply database schema
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d code_execution -f infra/schema.sql
+
+      - name: Build sandbox runner images
+        run: |
+          docker build -t runner-python runners/python
+          docker build -t runner-javascript runners/javascript
+
+      - name: Start API Gateway (background)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/code_execution
+          REDIS_URL: redis://localhost:6379
+          PORT: "8000"
+          METRICS_PORT: "9100"
+        run: |
+          node services/api-gateway/dist/index.js &
+          sleep 3
+          curl -sf http://localhost:8000/health || exit 1
+          echo "API Gateway healthy"
+
+      - name: Start Execution Worker (background)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/code_execution
+          REDIS_URL: redis://localhost:6379
+          METRICS_PORT: "9101"
+          TEMP_DIR: /tmp/sandbox
+        run: |
+          mkdir -p /tmp/sandbox
+          node services/execution-worker/dist/index.js &
+          sleep 2
+
+      - name: Start System Monitor (background)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/code_execution
+          REDIS_URL: redis://localhost:6379
+          METRICS_PORT: "9102"
+        run: |
+          node services/system-monitor/dist/index.js &
+          sleep 1
+
+      - name: Run end-to-end WebSocket stream test
+        run: node test-ws.js
+
+      - name: Run failure test suite
+        run: bash tests/failure/run-failure-tests.sh
+
+      - name: Verify Prometheus metrics endpoints are alive
+        run: |
+          curl -sf http://localhost:9100/metrics | grep -q 'code_execution_queue_depth'
+          curl -sf http://localhost:9101/metrics | grep -q 'code_execution_active_workers'
+          curl -sf http://localhost:9102/metrics | grep -q 'code_execution_dead_worker_recoveries'
+          echo "All metrics endpoints healthy"

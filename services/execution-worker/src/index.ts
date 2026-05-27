@@ -69,10 +69,10 @@ async function sendToDLQ(job: QueuePayload, reason: string) {
 
   // Store a result record for the DLQ failure (idempotent — skip if already exists)
   await pool.query(
-    `INSERT INTO submission_results (job_id, exit_code, stdout, stderr, error_message)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO submission_results (job_id, exit_code, stdout, stderr, error_message, error_category)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (job_id) DO NOTHING`,
-    [job.jobId, null, '', '', `Dead Letter: ${reason}`]
+    [job.jobId, null, '', '', `Dead Letter: ${reason}`, 'WORKER_CRASH']
   );
 
   logger.error({ jobId: job.jobId, retryCount: job.retryCount, reason }, 'Job moved to Dead Letter Queue');
@@ -166,16 +166,29 @@ async function processQueue() {
       // ── Determine final status ──────────────────────────
       let finalStatus = SubmissionStatus.COMPLETED;
       let errorMessage: string | null = null;
+      let errorCategory: string | null = null;
 
       if (result.timedOut) {
         finalStatus = SubmissionStatus.TIMEOUT;
         errorMessage = 'Execution timed out (limit: 5 seconds)';
+        errorCategory = 'TIMEOUT';
+      } else if (result.outputCapReached) {
+        finalStatus = SubmissionStatus.FAILED;
+        errorMessage = 'Output limit exceeded (limit: 1 MB)';
+        errorCategory = 'RUNTIME_ERROR';
       } else if (result.oomKilled) {
         finalStatus = SubmissionStatus.FAILED;
         errorMessage = 'Out of Memory: container killed by OOM limiter (128MB)';
+        errorCategory = 'OOM';
       } else if (result.exitCode !== 0) {
         finalStatus = SubmissionStatus.FAILED;
         errorMessage = `Execution failed with exit code ${result.exitCode}`;
+        const stderrStr = result.stderr || '';
+        if (stderrStr.includes('SyntaxError') || stderrStr.includes('IndentationError')) {
+          errorCategory = 'SYNTAX_ERROR';
+        } else {
+          errorCategory = 'RUNTIME_ERROR';
+        }
       }
 
       // ── Atomic transactional result persistence ────────
@@ -196,10 +209,10 @@ async function processQueue() {
         // 1. Insert result — idempotent: skip silently if a prior attempt already wrote it
         await client.query(
           `INSERT INTO submission_results
-             (job_id, exit_code, stdout, stderr, error_message, execution_time_ms)
-           VALUES ($1, $2, $3, $4, $5, $6)
+             (job_id, exit_code, stdout, stderr, error_message, error_category, execution_time_ms, memory_used_bytes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (job_id) DO NOTHING`,
-          [job.jobId, result.exitCode, result.stdout, result.stderr, errorMessage, result.executionTimeMs]
+          [job.jobId, result.exitCode, result.stdout, result.stderr, errorMessage, errorCategory, result.executionTimeMs, result.memoryUsedBytes]
         );
 
         // 2. Update parent submission status within the same atomic boundary
