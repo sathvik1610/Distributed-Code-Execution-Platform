@@ -46,8 +46,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    networks:
-      - execution_net
 
   # ── Execution Worker ────────────────────────────────────────────────────
   # Run multiple replicas to demonstrate horizontal scaling:
@@ -63,7 +61,7 @@ services:
       DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/code_execution"
       REDIS_URL: "redis://redis:6379"
       # Temp dir mounted from host so Docker-in-Docker can access sandbox code files
-      TEMP_DIR: "/app/temp"
+      TEMP_DIR: "/home/sathvik_pilyanam/Distributed-Code-Execution-Platform/temp"
       NODE_ENV: "production"
       LOG_LEVEL: "info"
     volumes:
@@ -73,14 +71,12 @@ services:
       # a rootless container runtime. The alternative to --privileged here is running
       # the worker directly on the host with: sudo usermod -aG docker $USER (then re-login).
       - /var/run/docker.sock:/var/run/docker.sock
-      - ../temp:/app/temp
+      - /home/sathvik_pilyanam/Distributed-Code-Execution-Platform/temp:/home/sathvik_pilyanam/Distributed-Code-Execution-Platform/temp
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    networks:
-      - execution_net
 
   # ── System Monitor ──────────────────────────────────────────────────────
   system-monitor:
@@ -102,9 +98,3 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    networks:
-      - execution_net
-
-networks:
-  execution_net:
-    driver: bridge

@@ -1,7 +1,7 @@
 # Image pinned to a specific digest to prevent supply-chain drift.
 # To update: docker pull python:3.11-slim && docker inspect python:3.11-slim --format '{{index .RepoDigests 0}}'
 # Then replace the digest below with the new value.
-FROM python:3.11-slim@sha256:ad48727891de5cfa5e44c7e5a0e2f0f6f5c9bb6e9f7bb56e3f2aff17a8a3b7c
+FROM python:3.11-slim
 
 # Install nothing extra — minimal attack surface
 # hadolint ignore=DL3008
@@ -19,4 +19,4 @@ RUN chown runner:runner /app
 USER runner
 
 # The sandbox mounts code at /app/code.py via -v
-CMD ["python", "/app/code.py"]
+CMD ["python", "-u", "/app/code.py"]

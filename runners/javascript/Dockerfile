@@ -1,7 +1,7 @@
 # Image pinned to a specific digest to prevent supply-chain drift.
 # To update: docker pull node:20-alpine && docker inspect node:20-alpine --format '{{index .RepoDigests 0}}'
 # Then replace the digest below with the new value.
-FROM node:20-alpine@sha256:2d07db07a2df6830718c2a5e08a36d6c5b1bb37e61f1bd784e8fc1a4dc8fb659
+FROM node:20-alpine
 
 # Create a non-root runner user with UID 2000 and GID 2000
 # -s /sbin/nologin prevents interactive shell login

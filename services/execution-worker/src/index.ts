@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { v4 as uuidv4 } from 'uuid';
 import { pool } from './db.js';
-import { redis } from './redis.js';
+import { redis, redisPub } from './redis.js';
 import { logger } from '@code-execution/logger';
 import {
   startMetricsServer, activeWorkers, workerJobCounter,
@@ -76,6 +76,14 @@ async function sendToDLQ(job: QueuePayload, reason: string) {
   );
 
   logger.error({ jobId: job.jobId, retryCount: job.retryCount, reason }, 'Job moved to Dead Letter Queue');
+
+  // Publish EXECUTION_COMPLETE system signal for DLQ failure so active WebSocket closes cleanly
+  const completeChunk = {
+    type: 'system',
+    data: 'EXECUTION_COMPLETE',
+    timestamp: Date.now()
+  };
+  await redisPub.publish('jobs:streams:' + job.jobId, JSON.stringify(completeChunk));
 }
 
 // ──────────────────────────────────────────────────────────
@@ -233,6 +241,14 @@ async function processQueue() {
       // ── Acknowledge: remove from processing queue ───────
       // Only reached if the transaction above committed successfully.
       await redis.lrem(processingQueue, 1, rawJob);
+
+      // ── Publish EXECUTION_COMPLETE system signal ────────
+      const completeChunk = {
+        type: 'system',
+        data: 'EXECUTION_COMPLETE',
+        timestamp: Date.now()
+      };
+      await redisPub.publish('jobs:streams:' + job.jobId, JSON.stringify(completeChunk));
 
       // ── Update Prometheus metrics ───────────────────────
       workerJobCounter.inc({ worker_id: workerId, status: finalStatus, language: job.language });
