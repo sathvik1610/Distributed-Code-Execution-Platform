@@ -242,43 +242,109 @@ GET /health
 
 ---
 
-## Testing
+## Testing & E2E Verification Guide
 
-### End-to-End Stream Test
+The entire platform can be easily built, run, and verified from a completely clean state. Follow these step-by-step instructions:
+
+### 1. Prerequisites & Setup
+Ensure dependencies are installed and runner sandboxes are built:
+```bash
+# Install workspace packages
+npm ci
+
+# Compile shared libraries & microservices
+npm run build:shared && npm run build
+
+# Build sandbox runner images
+npm run docker:build:runners
+```
+
+### 2. Start the Platform
+Launch all microservices, databases, and monitoring stack in the background:
+```bash
+npm run start:all
+```
+
+---
+
+### 3. Verification Scenario 1: Real-Time WebSocket Streaming
+Submit a long-running python script and watch standard output stream back to the client in real-time, exactly 1 second apart, with a clean connection closure:
 ```bash
 node test-ws.js
 ```
 
-### Failure & Security Tests
+**Expected Output:**
+```
+Submitted job. ID: <job-id>
+Connecting to WebSocket: ws://localhost:8000/stream/<job-id>
+WS Connection opened successfully
+[WS Stream Chunk] Type: stdout, Data: Chunk 1: Starting computation..., Time: ...
+[WS Stream Chunk] Type: stdout, Data: Chunk 2: Middle of execution..., Time: ...
+[WS Stream Chunk] Type: stdout, Data: Chunk 3: Execution finished., Time: ...
+[WS Stream Chunk] Type: system, Data: EXECUTION_COMPLETE, Time: ...
+WS Connection closed. Code: 1000, Reason: Execution complete
+```
+
+---
+
+### 4. Verification Scenario 2: Automated Failure Containment
+Verify that the sandboxes contain malicious behavior (Infinite Loops, Fork Bombs, Out of Memory triggers, and Infinite Output attacks) successfully:
 ```bash
 npm run test:failure
 ```
+**Expected Results:**
+- **Test 1 (Infinite Loop):** Safely killed (Status: `TIMEOUT` in ~5s).
+- **Test 2 (Fork Bomb):** Contained by process limit limits (Status: `FAILED`, Exit Code `1`).
+- **Test 3 (OOM Attack):** Contained by memory hard limits (Status: `FAILED`, Exit Code `137` / `OOM`).
+- **Test 4 (Infinite Output):** Throttled and ended by 1 MB output cap (Status: `FAILED`).
 
-| Test | Attack | Expected |
-|---|---|---|
-| `01-infinite-loop.py` | `while True: pass` | `TIMEOUT` after 5s |
-| `02-fork-bomb.py` | `os.fork()` loop | Killed by `--pids-limit 50` |
-| `03-oom-attack.py` | Grow list to exhaust RAM | Exit 137, `errorCategory: OOM` |
-| `04-infinite-output.py` | `while True: print(...)` | Killed after 1 MB output cap |
-| `05-worker-crash.py` | Kill worker mid-execution | Reaper recovers and requeues |
+---
 
-### Load Testing
-```bash
-k6 run infra/k6-load-test.js
-```
+### 5. Verification Scenario 3: Manual Worker Crash & Resiliency Recovery
+This manual scenario tests the fault tolerance of the **System Monitor** and its ability to self-heal orphaned jobs when worker processes crash:
+
+1. **Terminal A (Watcher):** Watch the System Monitor logs:
+   ```bash
+   docker logs -f execution_system_monitor
+   ```
+2. **Terminal B (Runner):** Submit a long-running computation:
+   ```bash
+   node test-ws.js
+   ```
+3. **Trigger Crash (Terminal B):** Immediately kill the execution worker container mid-computation:
+   ```bash
+   docker kill infra-execution-worker-1
+   ```
+4. **Observe Recovery (Terminal A):** Within 10 seconds, you will see the System Monitor log:
+   ```json
+   {"level":40,"msg":"Dead workers detected!"}
+   {"level":30,"msg":"Found 1 orphan job(s) to recover"}
+   {"level":30,"msg":"Orphan job recovered — requeued (attempt 1 of 3)"}
+   ```
+5. **Resume Job (Terminal B):** Restart the worker container:
+   ```bash
+   docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml start execution-worker
+   ```
+6. **Verify (Terminal B):** Check Postgres to confirm the job was safely resumed and finished as `COMPLETED`:
+   ```bash
+   docker exec execution_postgres psql -U postgres -d code_execution -c "SELECT id, status, retry_count FROM submissions;"
+   ```
+
+---
+
+## Observability Dashboard
+
+Navigate to **`http://localhost:3000`** in your browser to view Grafana.
+- **Credentials:** `admin` / `admin`
+- Under **Dashboards**, open the pre-loaded **Distributed Code Execution Platform** dashboard to view real-time API latency percentiles, worker CPU/memory performance, and error metrics.
 
 ---
 
 ## Horizontal Scaling
 
-Workers are stateless — each instance generates a unique `workerId` UUID at startup and maintains its own heartbeat key and processing queue. Add capacity by running more instances:
-
+Workers are completely stateless. To simulate and run multiple workers in parallel:
 ```bash
-# docker compose: 3 parallel workers
+# Spin up 3 parallel workers running concurrently
 npm run start:all:scaled
-
-# Development: open more terminals running:
-npm run dev:worker
 ```
-
-The System Monitor's reaper handles all worker instances automatically — it scans `worker:heartbeat:*` and `jobs:queue:processing:*` keys regardless of how many workers are running.
+The System Monitor reaper automatically scales and handles heartbeat/dead-worker detection across all active instances.
