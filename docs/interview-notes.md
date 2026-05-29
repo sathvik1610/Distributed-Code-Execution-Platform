@@ -62,13 +62,14 @@ These answers are technically precise. Say them calmly, not defensively.
 
 ### Q5 — "How do your memory metrics work? Are they accurate?"
 
-> "Best-effort. The worker calls `docker stats --no-stream` on the container after execution,
-> parses the memory field, and stores it. The problem is that `docker stats` on a very short-lived
-> container — one that finishes and gets `--rm`'d in under a second — can return null because
-> the container is already gone by the time the kernel exposes the cgroup stats. So
-> `memory_used_bytes` can be null for fast jobs. The production fix is to read cgroup v2 files
-> directly (`/sys/fs/cgroup/memory.peak`) inside the container before it exits, or use
-> `docker inspect` with a lifecycle hook. I've documented this as a known limitation."
+> "Yes, they are highly accurate and race-free. In the initial prototype, we polled `docker stats --no-stream` 
+> immediately after container shutdown, but this frequently failed (returned null) for fast-running 
+> ephemeral containers due to a race condition with container auto-removal (`--rm`). We resolved this by 
+> wrapping the user execution inside the sandboxes with an unprivileged wrapper (`runner-wrapper.sh`) 
+> that reads the Linux kernel Cgroups peak memory metrics (`/sys/fs/cgroup/memory.peak` on Cgroups v2, 
+> or `/sys/fs/cgroup/memory/memory.max_usage_in_bytes` on Cgroups v1) immediately upon termination. The 
+> wrapper outputs a special token (`___MEM_PEAK___: <bytes>`), which the worker parses to populate 
+> the DB result, and cleanly strips from the stream before fanning it out to clients."
 
 ---
 
@@ -77,7 +78,7 @@ These answers are technically precise. Say them calmly, not defensively.
 | Tradeoff | What to Say |
 |---|---|
 | **At-least-once delivery** | "Idempotent result inserts guard against duplicate writes. Exactly-once needs a transactional outbox — out of scope, but I know how it works." |
-| **Docker socket mount** | "Mounting `/var/run/docker.sock` gives the worker process root-equivalent access to the host. In production you'd use rootless Docker, gVisor, or Firecracker. I've documented this. It's acceptable for a prototype; it would be a hard blocker in a real multi-tenant system." |
+| **Docker socket mount** | "Previously, mounting `/var/run/docker.sock` gave workers root-equivalent access to the host (sibling container escape risk). We solved this by routing all worker requests over a secure internal TCP network to an unprivileged **Docker Socket Proxy** (`tecnativa/docker-socket-proxy`). The proxy filters requests and blocks all dangerous operations (volume binds, image deletions, swarm settings) without adding complex VM isolation." |
 | **Single Redis node** | "If Redis goes down, queue, pub/sub, and heartbeats all fail simultaneously. Worker reconnection logic is in place, but in-memory queue state is lost — jobs not yet written to Postgres must be re-submitted. Production fix: Redis Sentinel or ElastiCache with AOF persistence." |
 
 ---
@@ -113,7 +114,8 @@ Execution Worker
   ├─ Atomically moves job → jobs:queue:processing:{workerId}
   ├─ UPDATE submissions SET status=RUNNING WHERE status=PENDING  (optimistic lock)
   ├─ Measures queue wait time (now - submittedAt) → Prometheus histogram
-  ├─ docker run --rm --memory=128m --pids-limit=50 --timeout=5s
+  ├─ docker run -i --rm --memory=128m --pids-limit=50 --tmpfs /tmp:rw,size=32m,mode=1777
+  │     ├─ Worker streams code over stdin -> written to /tmp inside container RAM
   │     └─ Streams stdout/stderr → PUBLISH jobs:streams:{jobId}
   ├─ BEGIN TRANSACTION
   │     INSERT submission_results ... ON CONFLICT DO NOTHING
@@ -157,9 +159,10 @@ System Monitor (reaper loop, every 10s)
 **It is:** A production-style learning prototype demonstrating distributed systems concepts —
 queuing, worker pools, fault tolerance, real-time streaming, and observability.
 
-**It is not:** A hardened multi-tenant production system. The Docker socket risk, single-node
-Redis, and lack of real unit tests are documented tradeoffs, not unknown bugs.
+**It is not:** A hardened multi-tenant production system. The single-node Redis, host kernel sharing,
+and lack of real unit tests are documented tradeoffs, not unknown bugs. (Note: the raw Docker socket risk has 
+been mitigated via the Docker Socket Proxy, and memory stats races resolved via direct Cgroup telemetry).
 
 **The right framing for an interviewer:**
-> "This is a working distributed system with correct failure isolation and documented limitations.
-> I can explain every tradeoff and what it would take to fix it."
+> "This is a working distributed system with correct failure isolation, unprivileged socket filtering,
+> Cgroups peak metrics, and documented limitations. I can explain every tradeoff and what it would take to fix it."

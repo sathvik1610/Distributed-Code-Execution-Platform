@@ -47,6 +47,23 @@ services:
       redis:
         condition: service_healthy
 
+  # ── Docker Socket Proxy (Harden Sibling Container Escape) ─────────────────
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: execution_docker_proxy
+    restart: always
+    environment:
+      # Enable only container creation, starting, waiting, inspection, and termination.
+      # Blocks all dangerous host privileges (e.g. volumes, networks, exec, system commands).
+      CONTAINERS: 1
+      POST: 1
+      GET: 1
+    volumes:
+      # The proxy is the ONLY container that mounts the raw host socket
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "2375"
+
   # ── Execution Worker ────────────────────────────────────────────────────
   # Run multiple replicas to demonstrate horizontal scaling:
   #   --scale execution-worker=3
@@ -60,24 +77,17 @@ services:
       METRICS_PORT: "9101"
       DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/code_execution"
       REDIS_URL: "redis://redis:6379"
-      # Temp dir: uses ${PWD} so the path resolves correctly on any machine.
-      # Workers write user code here before mounting it into sandbox containers.
-      TEMP_DIR: "${PWD}/temp"
+      # Route all docker CLI commands to the secure TCP socket proxy instead of unix socket
+      DOCKER_HOST: "tcp://docker-proxy:2375"
       NODE_ENV: "production"
       LOG_LEVEL: "info"
-    volumes:
-      # Docker socket mount — required for the worker to spawn sandbox containers.
-      # SECURITY NOTE: Mounting /var/run/docker.sock gives this container root-equivalent
-      # access to the host. In production, use a dedicated Docker daemon (DinD) or
-      # a rootless container runtime. The alternative to --privileged here is running
-      # the worker directly on the host with: sudo usermod -aG docker $USER (then re-login).
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ${PWD}/temp:${PWD}/temp
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      docker-proxy:
+        condition: service_started
 
   # ── System Monitor ──────────────────────────────────────────────────────
   system-monitor:

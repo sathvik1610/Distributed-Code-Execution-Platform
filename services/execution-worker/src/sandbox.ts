@@ -1,15 +1,7 @@
 import { spawn } from 'child_process';
-import { promises as fs } from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { logger } from '@code-execution/logger';
 import { redisPub } from './redis.js';
 import { StreamChunk } from '@code-execution/contracts';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const TEMP_DIR = process.env.TEMP_DIR || path.resolve(__dirname, '../../../temp');
 
 // Hard accumulated output cap for DB persistence (64 KB)
 const MAX_OUTPUT_SIZE = 64 * 1024;
@@ -35,19 +27,13 @@ export async function runInSandbox(
   language: 'python' | 'javascript',
   timeoutMs = 5000
 ): Promise<SandboxResult> {
-  await fs.mkdir(TEMP_DIR, { recursive: true });
-
-  const ext = language === 'python' ? 'py' : 'js';
-  const fileName = 'sub_' + jobId + '.' + ext;
-  const hostFilePath = path.join(TEMP_DIR, fileName);
-
-  await fs.writeFile(hostFilePath, code, 'utf-8');
 
   const containerName = 'sub_' + jobId;
   const imageName = 'runner-' + language;
 
   const dockerArgs = [
     'run',
+    '-i', // Keep stdin open to stream user code string
     '--rm',
     '--name', containerName,
     '--network', 'none',
@@ -55,11 +41,10 @@ export async function runInSandbox(
     '--memory-swap', '128m',
     '--pids-limit', '50',
     '--read-only',
-    '--tmpfs', '/tmp:rw,size=32m',
+    '--tmpfs', '/tmp:rw,size=32m,mode=1777',
     '--user', 'runner',
     '--cap-drop', 'ALL',
     '--security-opt', 'no-new-privileges',
-    '-v', hostFilePath + ':/app/code.' + ext + ':ro',
     imageName
   ];
 
@@ -72,8 +57,13 @@ export async function runInSandbox(
   let oomKilled = false;
   let totalPublishedBytes = 0;
   let outputCapReached = false;
+  let memoryUsedBytes: number | null = null;
 
   const child = spawn('docker', dockerArgs);
+
+  // Pipe raw user code string over network/stdin stream to the secure container
+  child.stdin.write(code);
+  child.stdin.end();
 
   const timeoutTimer = setTimeout(() => {
     logger.warn({ jobId, containerName }, 'Execution timed out — killing container');
@@ -88,7 +78,19 @@ export async function runInSandbox(
 
   const handleOutput = (type: 'stdout' | 'stderr', data: Buffer, accumulator: string): string => {
     if (outputCapReached) return accumulator;
-    const text = data.toString('utf-8');
+    let text = data.toString('utf-8');
+
+    // Parse Linux Cgroup memory peak usage token if present in standard streams
+    const memMatch = text.match(/___MEM_PEAK___:\s*(\d+)/);
+    if (memMatch) {
+      memoryUsedBytes = parseInt(memMatch[1], 10);
+      text = text.replace(/___MEM_PEAK___:\s*\d+\r?\n?/, '');
+    }
+
+    if (text.length === 0) {
+      return accumulator;
+    }
+
     totalPublishedBytes += Buffer.byteLength(text, 'utf-8');
     if (totalPublishedBytes > MAX_PUBSUB_BYTES) {
       outputCapReached = true;
@@ -110,30 +112,6 @@ export async function runInSandbox(
       clearTimeout(timeoutTimer);
       const endTime = performance.now();
       const executionTimeMs = Math.round(endTime - startTime);
-
-      // Read peak memory usage via docker stats immediately after container stops
-      let memoryUsedBytes: number | null = null;
-      try {
-        memoryUsedBytes = await new Promise<number | null>((res) => {
-          const statsProc = spawn('docker', ['stats', '--no-stream', '--format', '{{.MemUsage}}', containerName]);
-          let raw = '';
-          statsProc.stdout.on('data', (d: Buffer) => { raw += d.toString(); });
-          statsProc.on('close', () => {
-            const match = raw.trim().match(/^([\d.]+)(\w+)/i);
-            if (!match) { res(null); return; }
-            const value = parseFloat(match[1]);
-            const unit = match[2].toLowerCase();
-            if (unit.startsWith('ki')) res(Math.round(value * 1024));
-            else if (unit.startsWith('mi')) res(Math.round(value * 1024 * 1024));
-            else if (unit.startsWith('gi')) res(Math.round(value * 1024 * 1024 * 1024));
-            else res(Math.round(value));
-          });
-          statsProc.on('error', () => res(null));
-        });
-      } catch { memoryUsedBytes = null; }
-
-      try { await fs.unlink(hostFilePath); }
-      catch (err) { logger.error(err, 'Failed to delete temp file'); }
 
       if (code === 137 && !timedOut) oomKilled = true;
 

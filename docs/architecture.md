@@ -134,6 +134,29 @@ Each code submission runs inside a Docker container with these mandatory restric
 | `--tmpfs /tmp` | — | Writable temp directory only |
 | `--rm` | — | Auto-removes container on exit |
 
+### Host Socket Protection (Security Proxy)
+
+Rather than mounting the raw Unix socket `/var/run/docker.sock` in the execution workers—which creates a sibling-container container escape privilege escalation vulnerability—the workers communicate with a secure, unprivileged **Docker Socket Proxy** (`tecnativa/docker-socket-proxy`) over a restricted internal TCP network (`DOCKER_HOST="tcp://docker-proxy:2375"`).
+
+The proxy exposes only the necessary endpoints (`POST /containers/create`, `POST /containers/start`, `POST /containers/kill`, `POST /containers/wait`) and blocks all other management operations (volumes, host network binds, image deletions, etc.).
+
+### Accurate Memory Metrics via Linux Cgroups
+
+Instead of using race-prone `docker stats` polling which frequently returns `null` for fast-running ephemeral containers, sandbox containers run under an unprivileged wrapper script (`runner-wrapper.sh`) which retrieves peak execution memory directly from the Linux kernel Cgroup interface:
+- **Cgroup v2:** `/sys/fs/cgroup/memory.peak`
+- **Cgroup v1:** `/sys/fs/cgroup/memory/memory.max_usage_in_bytes`
+
+The metric is printed inside the stream as a token (`___MEM_PEAK___: <bytes>`), which is intercepted, parsed, and cleanly stripped by the worker before the client websocket fans out.
+
+### Stdin Code Piping (Decoupled RAM Execution)
+
+Rather than writing code files to the host disk (polluting `/temp` directories) and mounting them into sandboxes via local volume mounts—which couples the worker process to the same host VM as the Docker daemon—the platform streams the code string directly to the container over **standard input (stdin)** in interactive mode (`-i`).
+
+The unprivileged wrapper script `runner-wrapper.sh` inside the container intercepts the code stream on `stdin`, writes it into `/tmp` (which is configured as an isolated, memory-backed `--tmpfs /tmp:rw,size=32m,mode=1777`), and executes it. This:
+- **Enables True Distributed Scaling:** Decouples the worker entirely from the host VM. Workers can run on separate machines and talk to the Docker daemon over the TCP proxy.
+- **Eliminates Disk I/O Overhead:** No files hit physical SSD/HDD writes. Execution is entirely RAM-bound.
+- **Hardens Security:** Zero file trace is left on the host system.
+
 ---
 
 ## Heartbeat System

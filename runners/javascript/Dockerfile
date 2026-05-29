@@ -11,8 +11,13 @@ RUN addgroup -g 2000 runner && adduser -u 2000 -G runner -s /sbin/nologin -D run
 WORKDIR /app
 RUN chown runner:runner /app
 
+# Copy wrapper script
+COPY runner-wrapper.sh /app/runner-wrapper.sh
+RUN chmod +x /app/runner-wrapper.sh && chown runner:runner /app/runner-wrapper.sh
+
 # Drop to non-root user
 USER runner
 
-# The sandbox mounts code at /app/code.js via -v
+# Use wrapper script to run node code and capture cgroup peak memory metrics
+ENTRYPOINT ["/app/runner-wrapper.sh"]
 CMD ["node", "/app/code.js"]

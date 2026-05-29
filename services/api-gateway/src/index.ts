@@ -50,6 +50,9 @@ subscriber.on('pmessage', (pattern, channel, message) => {
 });
 
 
+// Auth Hook / Rate Limit Bypass Key
+const API_KEY = process.env.API_KEY;
+
 // Rate Limiting: 30 submissions per minute per IP.
 // Counters live in Redis (not in-process memory) so limits are enforced
 // correctly across multiple gateway instances behind a load balancer.
@@ -59,6 +62,12 @@ await app.register(fastifyRateLimit, {
   timeWindow: '1 minute',
   redis: redis,
   keyGenerator: (request) => request.ip,
+  allowList: (request: any) => {
+    return request.url === '/health' ||
+           request.ip === '127.0.0.1' ||
+           request.ip === '::1' ||
+           (API_KEY !== undefined && request.headers['x-api-key'] === API_KEY);
+  },
   errorResponseBuilder: (_request, context) => {
     rateLimitHits.inc();
     return {
@@ -70,7 +79,6 @@ await app.register(fastifyRateLimit, {
 });
 
 // Auth Hook: require X-API-Key on all /submissions and /dlq routes
-const API_KEY = process.env.API_KEY;
 if (!API_KEY) {
   logger.error('API_KEY environment variable not set! API Gateway auth is securely locked to FAIL-SECURE. All protected endpoints will reject requests.');
 }

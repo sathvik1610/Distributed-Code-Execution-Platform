@@ -15,8 +15,13 @@ RUN groupadd -g 1000 runner && useradd -u 1000 -g runner -m -s /usr/sbin/nologin
 WORKDIR /app
 RUN chown runner:runner /app
 
+# Copy wrapper script
+COPY runner-wrapper.sh /app/runner-wrapper.sh
+RUN chmod +x /app/runner-wrapper.sh && chown runner:runner /app/runner-wrapper.sh
+
 # Drop to non-root user
 USER runner
 
-# The sandbox mounts code at /app/code.py via -v
+# Use wrapper script to run python code and capture cgroup peak memory metrics
+ENTRYPOINT ["/app/runner-wrapper.sh"]
 CMD ["python", "-u", "/app/code.py"]
