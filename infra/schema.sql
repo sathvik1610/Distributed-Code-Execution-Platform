@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS submission_results (
     error_category    VARCHAR(30),
     execution_time_ms INT,
     memory_used_bytes BIGINT,
+    output_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+    stream_output_limit_exceeded BOOLEAN NOT NULL DEFAULT FALSE,
     created_at        TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_submission_results_job_id UNIQUE (job_id),
     CONSTRAINT fk_submission_results_job_id FOREIGN KEY (job_id) REFERENCES submissions(id),
@@ -73,4 +75,6 @@ CREATE INDEX IF NOT EXISTS idx_submission_results_job_id
 -- Run this if upgrading from schema v2.0:
 --   ALTER TABLE submission_results ADD COLUMN IF NOT EXISTS error_category VARCHAR(30);
 --   ALTER TABLE submission_results ALTER COLUMN memory_used_bytes TYPE BIGINT;
+--   ALTER TABLE submission_results ADD COLUMN IF NOT EXISTS output_truncated BOOLEAN NOT NULL DEFAULT FALSE;
+--   ALTER TABLE submission_results ADD COLUMN IF NOT EXISTS stream_output_limit_exceeded BOOLEAN NOT NULL DEFAULT FALSE;
 -- ============================================================

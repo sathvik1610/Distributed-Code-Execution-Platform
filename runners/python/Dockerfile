@@ -1,6 +1,4 @@
-# Image pinned to a specific digest to prevent supply-chain drift.
-# To update: docker pull python:3.11-slim && docker inspect python:3.11-slim --format '{{index .RepoDigests 0}}'
-# Then replace the digest below with the new value.
+# Runtime image. For production hardening, pin this tag to a trusted digest.
 FROM python:3.11-slim
 
 # Install nothing extra — minimal attack surface

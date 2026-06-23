@@ -1,15 +1,16 @@
 import 'dotenv/config';
 import { v4 as uuidv4 } from 'uuid';
-import { pool } from './db.js';
+import { pool, initDb } from './db.js';
 import { redis, redisPub } from './redis.js';
 import { logger } from '@code-execution/logger';
 import {
   startMetricsServer, activeWorkers, workerJobCounter,
-  executionDuration, deadLetterJobs, queueWaitTime
+  executionDuration, deadLetterJobs, queueWaitTime,
+  outputTruncations, streamOutputLimitHits
 } from '@code-execution/metrics';
 import {
   SubmissionStatus, QueuePayload, DLQPayload,
-  QUEUE_KEYS, MAX_RETRY_COUNT
+  QUEUE_KEYS, MAX_RETRY_COUNT, STREAM_RETENTION_COUNT, STREAM_TTL_SECONDS
 } from '@code-execution/contracts';
 import { runInSandbox } from './sandbox.js';
 
@@ -40,6 +41,19 @@ function backoffMs(retryCount: number): number {
   return Math.pow(2, retryCount) * 1000;
 }
 
+async function publishSystemChunk(jobId: string, data: string): Promise<void> {
+  const chunk = {
+    type: 'system',
+    data,
+    timestamp: Date.now()
+  };
+  const serialized = JSON.stringify(chunk);
+  const streamKey = QUEUE_KEYS.STREAM(jobId);
+  await redis.xadd(streamKey, 'MAXLEN', '~', STREAM_RETENTION_COUNT, '*', 'payload', serialized);
+  await redisPub.publish(streamKey, serialized);
+  await redis.expire(streamKey, STREAM_TTL_SECONDS);
+}
+
 // ──────────────────────────────────────────────────────────
 // Send to Dead Letter Queue
 // Called when a job has exhausted MAX_RETRY_COUNT attempts.
@@ -58,32 +72,41 @@ async function sendToDLQ(job: QueuePayload, reason: string) {
     reason
   };
 
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE submissions SET status = $1, updated_at = NOW() WHERE id = $2`,
+      [SubmissionStatus.FAILED, job.jobId]
+    );
+    await client.query(
+      `INSERT INTO submission_results
+         (job_id, exit_code, stdout, stderr, error_message, error_category, output_truncated, stream_output_limit_exceeded)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (job_id) DO UPDATE SET
+         exit_code = EXCLUDED.exit_code,
+         stdout = EXCLUDED.stdout,
+         stderr = EXCLUDED.stderr,
+         error_message = EXCLUDED.error_message,
+         error_category = EXCLUDED.error_category,
+         output_truncated = EXCLUDED.output_truncated,
+         stream_output_limit_exceeded = EXCLUDED.stream_output_limit_exceeded`,
+      [job.jobId, null, '', '', `Dead Letter: ${reason}`, 'WORKER_CRASH', false, false]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
   await redis.lpush(QUEUE_KEYS.DEAD_LETTER, JSON.stringify(dlqPayload));
   deadLetterJobs.inc();
 
-  // Mark the submission as permanently FAILED in the database
-  await pool.query(
-    `UPDATE submissions SET status = $1, updated_at = NOW() WHERE id = $2`,
-    [SubmissionStatus.FAILED, job.jobId]
-  );
-
-  // Store a result record for the DLQ failure (idempotent — skip if already exists)
-  await pool.query(
-    `INSERT INTO submission_results (job_id, exit_code, stdout, stderr, error_message, error_category)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (job_id) DO NOTHING`,
-    [job.jobId, null, '', '', `Dead Letter: ${reason}`, 'WORKER_CRASH']
-  );
-
   logger.error({ jobId: job.jobId, retryCount: job.retryCount, reason }, 'Job moved to Dead Letter Queue');
 
-  // Publish EXECUTION_COMPLETE system signal for DLQ failure so active WebSocket closes cleanly
-  const completeChunk = {
-    type: 'system',
-    data: 'EXECUTION_COMPLETE',
-    timestamp: Date.now()
-  };
-  await redisPub.publish('jobs:streams:' + job.jobId, JSON.stringify(completeChunk));
+  await publishSystemChunk(job.jobId, 'EXECUTION_COMPLETE');
 }
 
 // ──────────────────────────────────────────────────────────
@@ -187,9 +210,9 @@ async function processQueue() {
         finalStatus = SubmissionStatus.TIMEOUT;
         errorMessage = 'Execution timed out (limit: 5 seconds)';
         errorCategory = 'TIMEOUT';
-      } else if (result.outputCapReached) {
+      } else if (result.streamOutputLimitExceeded) {
         finalStatus = SubmissionStatus.FAILED;
-        errorMessage = 'Output limit exceeded (limit: 1 MB)';
+        errorMessage = 'Stream output limit exceeded (limit: 1 MB)';
         errorCategory = 'RUNTIME_ERROR';
       } else if (result.oomKilled) {
         finalStatus = SubmissionStatus.FAILED;
@@ -221,13 +244,21 @@ async function processQueue() {
       try {
         await client.query('BEGIN');
 
-        // 1. Insert result — idempotent: skip silently if a prior attempt already wrote it
         await client.query(
           `INSERT INTO submission_results
-             (job_id, exit_code, stdout, stderr, error_message, error_category, execution_time_ms, memory_used_bytes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           ON CONFLICT (job_id) DO NOTHING`,
-          [job.jobId, result.exitCode, result.stdout, result.stderr, errorMessage, errorCategory, result.executionTimeMs, result.memoryUsedBytes]
+             (job_id, exit_code, stdout, stderr, error_message, error_category, execution_time_ms, memory_used_bytes, output_truncated, stream_output_limit_exceeded)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (job_id) DO UPDATE SET
+             exit_code = EXCLUDED.exit_code,
+             stdout = EXCLUDED.stdout,
+             stderr = EXCLUDED.stderr,
+             error_message = EXCLUDED.error_message,
+             error_category = EXCLUDED.error_category,
+             execution_time_ms = EXCLUDED.execution_time_ms,
+             memory_used_bytes = EXCLUDED.memory_used_bytes,
+             output_truncated = EXCLUDED.output_truncated,
+             stream_output_limit_exceeded = EXCLUDED.stream_output_limit_exceeded`,
+          [job.jobId, result.exitCode, result.stdout, result.stderr, errorMessage, errorCategory, result.executionTimeMs, result.memoryUsedBytes, result.outputTruncated, result.streamOutputLimitExceeded]
         );
 
         // 2. Update parent submission status within the same atomic boundary
@@ -249,17 +280,13 @@ async function processQueue() {
       // Only reached if the transaction above committed successfully.
       await redis.lrem(processingQueue, 1, rawJob);
 
-      // ── Publish EXECUTION_COMPLETE system signal ────────
-      const completeChunk = {
-        type: 'system',
-        data: 'EXECUTION_COMPLETE',
-        timestamp: Date.now()
-      };
-      await redisPub.publish('jobs:streams:' + job.jobId, JSON.stringify(completeChunk));
+      await publishSystemChunk(job.jobId, 'EXECUTION_COMPLETE');
 
       // ── Update Prometheus metrics ───────────────────────
       workerJobCounter.inc({ worker_id: workerId, status: finalStatus, language: job.language });
       executionDuration.observe({ language: job.language, status: finalStatus }, result.executionTimeMs);
+      if (result.outputTruncated) outputTruncations.inc();
+      if (result.streamOutputLimitExceeded) streamOutputLimitHits.inc();
 
       logger.info({ jobId: job.jobId, status: finalStatus, executionTimeMs: result.executionTimeMs }, 'Job completed');
 
@@ -286,6 +313,7 @@ const METRICS_PORT = parseInt(process.env.METRICS_PORT || '9101', 10);
 
 async function bootstrap() {
   try {
+    await initDb();
     await startMetricsServer(METRICS_PORT, {
       queueDepthProvider: async () => {
         return await redis.llen(QUEUE_KEYS.PENDING);

@@ -200,7 +200,7 @@ export function testWebSocketStreaming() {
   // Connect to WebSocket stream for this job
   const wsUrl = `ws://localhost:8000/stream/${jobId}`;
 
-  const response = ws.connect(wsUrl, {}, function(socket) {
+  const response = ws.connect(wsUrl, { headers: { 'X-API-Key': API_KEY } }, function(socket) {
     socket.on('open', () => {
       check(socket, { 'ws: connection opened': () => true });
     });

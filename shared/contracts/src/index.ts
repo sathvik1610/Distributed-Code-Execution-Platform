@@ -6,6 +6,16 @@ export enum SubmissionStatus {
   TIMEOUT = 'TIMEOUT'
 }
 
+export const TERMINAL_STATUSES = new Set<SubmissionStatus>([
+  SubmissionStatus.COMPLETED,
+  SubmissionStatus.FAILED,
+  SubmissionStatus.TIMEOUT
+]);
+
+export function isTerminalStatus(status: SubmissionStatus | string | null | undefined): boolean {
+  return status !== null && status !== undefined && TERMINAL_STATUSES.has(status as SubmissionStatus);
+}
+
 export enum ErrorCategory {
   SYNTAX_ERROR  = 'SYNTAX_ERROR',
   RUNTIME_ERROR = 'RUNTIME_ERROR',
@@ -63,6 +73,8 @@ export interface SubmissionResult {
   errorCategory?: ErrorCategory | null;
   executionTimeMs?: number;
   memoryUsedBytes?: number | null;
+  outputTruncated?: boolean;
+  streamOutputLimitExceeded?: boolean;
 }
 
 export interface DLQPayload {
@@ -92,3 +104,8 @@ export const MAX_RETRY_COUNT = 3;
 export const HEARTBEAT_TTL_SECONDS = 15;
 export const HEARTBEAT_INTERVAL_MS = 5000;
 export const MAX_CODE_LENGTH = 65536;
+export const MAX_RESULT_OUTPUT_BYTES = 64 * 1024;
+export const MAX_STREAM_OUTPUT_BYTES = 1024 * 1024;
+export const MAX_STREAM_CHUNK_BYTES = 16 * 1024;
+export const STREAM_RETENTION_COUNT = 1000;
+export const STREAM_TTL_SECONDS = 60 * 60;

@@ -26,11 +26,11 @@ import { redis } from './redis.js';
 import { pool } from './db.js';
 import { logger } from '@code-execution/logger';
 import {
-  deadWorkerRecoveries, deadLetterJobs
+  deadWorkerRecoveries, deadLetterJobs, reaperTerminalSkips
 } from '@code-execution/metrics';
 import {
   QueuePayload, DLQPayload, SubmissionStatus,
-  QUEUE_KEYS, MAX_RETRY_COUNT
+  QUEUE_KEYS, MAX_RETRY_COUNT, isTerminalStatus
 } from '@code-execution/contracts';
 
 // ── Scanning Configuration ─────────────────────────────────────────────────
@@ -90,22 +90,37 @@ async function sendToDLQ(job: QueuePayload, reason: string): Promise<void> {
     reason
   };
 
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE submissions SET status = $1, updated_at = NOW() WHERE id = $2`,
+      [SubmissionStatus.FAILED, job.jobId]
+    );
+    await client.query(
+      `INSERT INTO submission_results
+         (job_id, exit_code, stdout, stderr, error_message, error_category, output_truncated, stream_output_limit_exceeded)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (job_id) DO UPDATE SET
+         exit_code = EXCLUDED.exit_code,
+         stdout = EXCLUDED.stdout,
+         stderr = EXCLUDED.stderr,
+         error_message = EXCLUDED.error_message,
+         error_category = EXCLUDED.error_category,
+         output_truncated = EXCLUDED.output_truncated,
+         stream_output_limit_exceeded = EXCLUDED.stream_output_limit_exceeded`,
+      [job.jobId, null, '', '', `Dead Letter: ${reason}`, 'WORKER_CRASH', false, false]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
   await redis.lpush(QUEUE_KEYS.DEAD_LETTER, JSON.stringify(dlqPayload));
   deadLetterJobs.inc();
-
-  // Permanently mark the submission as FAILED
-  await pool.query(
-    `UPDATE submissions SET status = $1, updated_at = NOW() WHERE id = $2`,
-    [SubmissionStatus.FAILED, job.jobId]
-  );
-
-  // Idempotently insert a failure result record
-  await pool.query(
-    `INSERT INTO submission_results (job_id, exit_code, stdout, stderr, error_message, error_category)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (job_id) DO NOTHING`,
-    [job.jobId, null, '', '', `Dead Letter: ${reason}`, 'WORKER_CRASH']
-  );
 
   logger.error({ jobId: job.jobId, retryCount: job.retryCount, reason }, 'Orphan job sent to DLQ');
 }
@@ -148,11 +163,12 @@ async function recoverJobsFromDeadWorker(deadWorkerId: string): Promise<void> {
     );
     const currentStatus = dbResult.rows[0]?.status;
 
-    if (currentStatus === 'COMPLETED' || currentStatus === 'FAILED') {
+    if (isTerminalStatus(currentStatus)) {
       logger.info(
         { jobId: job.jobId, currentStatus },
         'Job already terminal in DB — skipping requeue, removing from dead worker queue'
       );
+      reaperTerminalSkips.inc();
       continue;
     }
 

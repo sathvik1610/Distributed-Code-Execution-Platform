@@ -52,6 +52,7 @@ subscriber.on('pmessage', (pattern, channel, message) => {
 
 // Auth Hook / Rate Limit Bypass Key
 const API_KEY = process.env.API_KEY;
+const ALLOW_UNAUTHENTICATED_DEV = process.env.ALLOW_UNAUTHENTICATED_DEV === 'true' && process.env.NODE_ENV !== 'production';
 
 // Rate Limiting: 30 submissions per minute per IP.
 // Counters live in Redis (not in-process memory) so limits are enforced
@@ -78,14 +79,21 @@ await app.register(fastifyRateLimit, {
   }
 });
 
-// Auth Hook: require X-API-Key on all /submissions and /dlq routes
-if (!API_KEY) {
-  logger.error('API_KEY environment variable not set! API Gateway auth is securely locked to FAIL-SECURE. All protected endpoints will reject requests.');
+// Auth Hook: require X-API-Key on all protected routes
+if (!API_KEY && process.env.NODE_ENV === 'production') {
+  logger.error('API_KEY environment variable not set in production. API Gateway refuses to start.');
+  process.exit(1);
+}
+if (!API_KEY && ALLOW_UNAUTHENTICATED_DEV) {
+  logger.warn('ALLOW_UNAUTHENTICATED_DEV=true: protected routes are running without API key enforcement.');
+} else if (!API_KEY) {
+  logger.error('API_KEY environment variable not set. Protected endpoints will reject requests unless ALLOW_UNAUTHENTICATED_DEV=true is set outside production.');
 }
 
 app.addHook('onRequest', async (request, reply) => {
   const url = request.url;
-  if (url === '/health' || url.startsWith('/stream/')) return;
+  if (url === '/health') return;
+  if (!API_KEY && ALLOW_UNAUTHENTICATED_DEV) return;
   if (!API_KEY) {
     logger.error({ ip: request.ip, url }, 'Blocked request to protected route because API_KEY is not configured on the server.');
     return reply.status(500).send({ error: 'Internal Server Error', message: 'API Gateway is securely locked. API_KEY environment variable is not configured on the server.' });

@@ -3,6 +3,7 @@ import { logger } from '@code-execution/logger';
 import { startMetricsServer } from '@code-execution/metrics';
 import { runReaperScan } from './reaper.js';
 import { redis } from './redis.js';
+import { initDb } from './db.js';
 import { QUEUE_KEYS } from '@code-execution/contracts';
 
 // ── Configuration ──────────────────────────────────────────────────────────
@@ -17,6 +18,7 @@ const METRICS_PORT = parseInt(process.env.METRICS_PORT || '9102', 10);
 async function bootstrap() {
   try {
     logger.info('Starting System Monitor / Reaper service...');
+    await initDb();
 
     // Start Prometheus metrics server
     await startMetricsServer(METRICS_PORT, {

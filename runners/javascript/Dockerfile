@@ -1,6 +1,4 @@
-# Image pinned to a specific digest to prevent supply-chain drift.
-# To update: docker pull node:20-alpine && docker inspect node:20-alpine --format '{{index .RepoDigests 0}}'
-# Then replace the digest below with the new value.
+# Runtime image. For production hardening, pin this tag to a trusted digest.
 FROM node:20-alpine
 
 # Create a non-root runner user with UID 2000 and GID 2000

@@ -37,7 +37,8 @@ const req = http.request({
 
     // 2. Connect to WebSocket stream for this jobId
     console.log(`Connecting to WebSocket: ws://localhost:8000/stream/${jobId}`);
-    const ws = new WebSocket(`ws://localhost:8000/stream/${jobId}`);
+    const wsHeaders = process.env.API_KEY ? { headers: { 'X-API-Key': process.env.API_KEY } } : undefined;
+    const ws = new WebSocket(`ws://localhost:8000/stream/${jobId}`, wsHeaders);
 
     ws.on('open', () => {
       console.log('WS Connection opened successfully');

@@ -61,7 +61,7 @@ services:
     volumes:
       # The proxy is the ONLY container that mounts the raw host socket
       - /var/run/docker.sock:/var/run/docker.sock
-    ports:
+    expose:
       - "2375"
 
   # ── Execution Worker ────────────────────────────────────────────────────
@@ -73,6 +73,8 @@ services:
       context: ..
       dockerfile: services/execution-worker/Dockerfile
     restart: unless-stopped
+    expose:
+      - "9101"
     environment:
       METRICS_PORT: "9101"
       DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/code_execution"

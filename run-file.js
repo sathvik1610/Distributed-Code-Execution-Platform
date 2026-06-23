@@ -70,7 +70,8 @@ const req = http.request({
       console.log(`\x1b[33m--- Stream Output ---\x1b[0m`);
 
       // 5. Connect to WebSocket stream
-      const ws = new WebSocket(`ws://localhost:8000/stream/${jobId}`);
+      const wsHeaders = process.env.API_KEY ? { headers: { 'X-API-Key': process.env.API_KEY } } : undefined;
+      const ws = new WebSocket(`ws://localhost:8000/stream/${jobId}`, wsHeaders);
 
       ws.on('message', (data) => {
         const chunk = JSON.parse(data.toString());

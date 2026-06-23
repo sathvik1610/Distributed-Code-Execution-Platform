@@ -67,6 +67,35 @@ export const rateLimitHits = new client.Counter({
   name: 'code_execution_rate_limit_hits_total',
   help: 'Total rate limit hits'
 });
+export const outputTruncations = new client.Counter({
+  name: 'code_execution_output_truncations_total',
+  help: 'Total number of jobs whose persisted stdout or stderr was truncated'
+});
+
+export const streamOutputLimitHits = new client.Counter({
+  name: 'code_execution_stream_output_limit_hits_total',
+  help: 'Total number of jobs killed after exceeding the live stream output cap'
+});
+
+export const enqueueFailures = new client.Counter({
+  name: 'code_execution_enqueue_failures_total',
+  help: 'Total number of submissions that failed to enqueue after DB insertion'
+});
+
+export const dockerSpawnFailures = new client.Counter({
+  name: 'code_execution_docker_spawn_failures_total',
+  help: 'Total number of Docker sandbox spawn failures'
+});
+
+export const reaperTerminalSkips = new client.Counter({
+  name: 'code_execution_reaper_terminal_skips_total',
+  help: 'Total number of orphan queue entries skipped because the DB row was already terminal'
+});
+
+export const websocketReplayConnections = new client.Counter({
+  name: 'code_execution_websocket_replay_connections_total',
+  help: 'Total number of WebSocket connections that replayed persisted stream chunks'
+});
 
 /**
  * Time a job spent in the queue before a worker picked it up.
