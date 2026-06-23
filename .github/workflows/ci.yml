@@ -56,39 +56,14 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 2: Sandbox security & failure tests
-  # Runs against real Docker + Redis + Postgres service containers.
-  # Tests the 5 adversarial scenarios: infinite loop, fork bomb, OOM, 
-  # infinite output, and worker crash recovery.
+  # Runs against the same Docker Compose stack used locally.
+  # Tests adversarial scenarios: infinite loop, fork bomb, OOM,
+  # infinite output, worker crash recovery, and API/WebSocket regressions.
   # ──────────────────────────────────────────────────────────────────────────
   failure-tests:
     name: Failure & Security Tests
     runs-on: ubuntu-latest
     needs: build
-
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: code_execution
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - name: Checkout
@@ -108,48 +83,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Apply database schema
-        env:
-          PGPASSWORD: postgres
-        run: psql -h localhost -U postgres -d code_execution -f infra/schema.sql
+      - name: Build TypeScript packages
+        run: npm run build
 
       - name: Build sandbox runner images
-        run: |
-          docker build -t runner-python runners/python
-          docker build -t runner-javascript runners/javascript
+        run: npm run docker:build:runners
 
-      - name: Start API Gateway (background)
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/code_execution
-          REDIS_URL: redis://localhost:6379
-          PORT: "8000"
-          METRICS_PORT: "9100"
-          API_KEY: test-api-key
-        run: |
-          node services/api-gateway/dist/index.js &
-          sleep 3
-          curl -sf http://localhost:8000/health || exit 1
-          echo "API Gateway healthy"
+      - name: Build Compose service images
+        run: docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml build
 
-      - name: Start Execution Worker (background)
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/code_execution
-          REDIS_URL: redis://localhost:6379
-          METRICS_PORT: "9101"
-          TEMP_DIR: /tmp/sandbox
-        run: |
-          mkdir -p /tmp/sandbox
-          node services/execution-worker/dist/index.js &
-          sleep 2
+      - name: Start Compose stack
+        run: docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml up -d --scale execution-worker=3
 
-      - name: Start System Monitor (background)
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/code_execution
-          REDIS_URL: redis://localhost:6379
-          METRICS_PORT: "9102"
+      - name: Wait for API Gateway
         run: |
-          node services/system-monitor/dist/index.js &
-          sleep 1
+          for i in {1..60}; do
+            if curl -sf http://localhost:8000/health > /dev/null; then
+              echo "API Gateway healthy"
+              exit 0
+            fi
+            docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml ps
+            sleep 2
+          done
+          docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml logs --tail=200
+          exit 1
 
       - name: Run end-to-end WebSocket stream test
         env:
@@ -164,6 +121,16 @@ jobs:
       - name: Verify Prometheus metrics endpoints are alive
         run: |
           curl -sf http://localhost:9100/metrics | grep -q 'code_execution_queue_depth'
-          curl -sf http://localhost:9101/metrics | grep -q 'code_execution_active_workers'
           curl -sf http://localhost:9102/metrics | grep -q 'code_execution_dead_worker_recoveries'
+          worker_container="$(docker ps --filter 'name=infra-execution-worker' --format '{{.Names}}' | head -n 1)"
+          test -n "$worker_container"
+          docker exec "$worker_container" wget -qO- http://localhost:9101/metrics | grep -q 'code_execution_worker_jobs_total'
           echo "All metrics endpoints healthy"
+
+      - name: Show Compose logs on failure
+        if: failure()
+        run: docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml logs --tail=300
+
+      - name: Stop Compose stack
+        if: always()
+        run: docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml down -v
