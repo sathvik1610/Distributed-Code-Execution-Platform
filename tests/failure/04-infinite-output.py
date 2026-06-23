@@ -89,8 +89,14 @@ def websocket_listener(job_id):
         def on_error(ws, error):
             print(f"  [WS] Error: {error}")
 
+        headers = []
+        api_key = os.environ.get("API_KEY", "test-api-key")
+        if api_key:
+            headers.append(f"X-API-Key: {api_key}")
+
         wsa = websocket.WebSocketApp(
             ws_url,
+            header=headers,
             on_open=on_open,
             on_message=on_message,
             on_close=on_close,
@@ -141,7 +147,7 @@ while True:
             print(f"PASS: WebSocket received {len(chunks_received)} streaming chunks without crashing")
         else:
             print("NOTE: WebSocket chunks not verified (websocket-client may not be installed)")
-    elif final["status"] == "FAILED" and "Output limit exceeded" in (final.get("errorMessage") or ""):
+    elif final["status"] == "FAILED" and "output limit" in (final.get("errorMessage") or "").lower():
         print("PASS: Infinite output was killed by output limit cap")
     else:
         print(f"FAIL: Expected TIMEOUT or FAILED (output cap), got {final['status']} (Message: {final.get('errorMessage')})")
