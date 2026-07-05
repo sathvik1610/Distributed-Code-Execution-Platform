@@ -9,7 +9,6 @@ Built as a systems/backend engineering project — queues, workers, sandboxing, 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
-- [Web UI](#web-ui)
 - [What This System Does](#what-this-system-does)
 - [Architecture](#architecture)
 - [Technology Stack](#technology-stack)
@@ -24,38 +23,59 @@ Built as a systems/backend engineering project — queues, workers, sandboxing, 
 
 **Prerequisites:** Node.js 20+, Docker + Docker Compose. On Windows, run Docker Desktop with the WSL2 backend.
 
-```bash
-# 1. Install
-git clone <this-repo>
-cd Distributed-Code-Execution-Platform
-npm ci
-
-# 2. Build (TypeScript packages + sandbox runner images + service images)
-npm run build
-npm run docker:build:runners
-docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml build
-
-# 3. Start the backend (Postgres, Redis, API Gateway, System Monitor, 3 workers)
-npm run start:all:scaled
-curl http://localhost:8000/health   # → {"status":"OK",...}
-
-# 4. Stop
-npm run stop:all
-```
-
 If `docker ps` fails with a permission error on WSL/Linux: `sudo usermod -aG docker $USER && newgrp docker` (then `wsl --shutdown` on Windows and reopen).
 
----
-
-## Web UI
-
-A browser client lives in `apps/web` — Monaco code editor, language selector, live streamed output, status progression, execution metrics, and job history.
+### 1. Install
 
 ```bash
-npm run dev:web   # with the backend already running
+git clone https://github.com/sathvik1610/Distributed-Code-Execution-Platform.git
+cd Distributed-Code-Execution-Platform
+npm ci                          # installs every workspace: services, shared packages, and the web UI
 ```
 
-Open **http://localhost:5173**. No `.env` needed — the dev server proxies API calls and injects the API key server-side, so it never reaches the browser.
+### 2. Build
+
+```bash
+npm run build                                                                          # compiles all TypeScript packages + services + the web UI
+npm run docker:build:runners                                                           # builds the Python/JavaScript sandbox images
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml build  # builds the service container images
+```
+
+### 3. Start the backend
+
+```bash
+npm run start:all:scaled            # Postgres, Redis, API Gateway, System Monitor, 3 execution workers
+curl http://localhost:8000/health   # sanity check → {"status":"OK","service":"api-gateway",...}
+```
+
+### 4. Start the web UI
+
+With the backend still running from step 3, in a **new terminal**:
+
+```bash
+npm run dev:web   # starts the Vite dev server
+```
+
+Open **http://localhost:5173** — Monaco code editor, language selector, live streamed output, status progression, execution metrics, and job history. No `.env` needed: the dev server proxies API calls to the backend and injects the API key server-side, so it never reaches the browser.
+
+### 5. Test it
+
+```bash
+npm run typecheck    # TypeScript compiler check only — no build output, just verifies there are no type errors across services/shared
+npm run test:failure # live adversarial suite against the running backend from step 3:
+                      #   infinite loop -> timeout, fork bomb -> pids-limit kill, OOM -> memory-limit kill,
+                      #   infinite output -> stream cap, worker crash -> reaper recovery, API/WebSocket regressions
+                      # expects: PASSED: 6, FAILED: 0
+```
+
+`test:failure` needs the backend from step 3 already running — it submits real jobs and checks how the live system reacts, it isn't a mocked unit-test suite. Full breakdown of what each test proves: [docs/testing.md](docs/testing.md).
+
+### Stopping / cleanup
+
+```bash
+npm run stop:all   # stops and removes all backend containers (Postgres, Redis, API Gateway, workers, monitor)
+# Ctrl+C in the dev:web terminal to stop the web UI
+```
 
 ---
 
