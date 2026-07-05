@@ -5,6 +5,56 @@ These answers are technically precise. Say them calmly, not defensively.
 
 ---
 
+## Lead With This: The Reaper Race Condition
+
+**When asked "tell me about a bug you found" or "walk me through a hard technical problem" — this is the answer, not the throughput numbers.** Almost any candidate can describe a system they built. Very few can describe a specific bug they found by testing their own claims, root-caused to an exact ordering issue, and fixed with a specific, defensible change. That's the actual skill this story demonstrates.
+
+**The honest framing (use this, don't sanitize it):**
+> "I designed the system to provide at-least-once delivery — heartbeats detect dead workers, a reaper requeues their orphaned jobs, idempotent writes prevent duplicate results. That was the claim. I didn't just assume it was true — I wrote a benchmark that kills a worker mid-execution and checks whether every job still completes. The first several runs disproved my own claim: it reliably lost 1 out of 9 jobs, every single time, not randomly. I traced the job through every system that touches it, found a race condition between the reaper's recovery ordering and a worker's claim logic, fixed it two ways, and reran the benchmark until it hit 100% repeatably."
+
+The full writeup — with the actual debugging steps, not just the fix — is in [failure-analysis/02-reaper-requeue-race-condition.md](failure-analysis/02-reaper-requeue-race-condition.md). Read it before any interview. See also Q5a below for the compressed spoken version.
+
+**The one framing mistake to avoid:** don't present "at-least-once delivery" and "no job loss" as if they were always true. They weren't — the benchmark caught a real gap between design intent and actual behavior. That gap, and how it was closed, is the interesting part. Presenting it as if it always worked throws away the best evidence you have of debugging skill.
+
+---
+
+## Resume Bullet (benchmark-backed, use this over generic phrasing)
+
+> Benchmarked a 500-job sustained workload on a 3-worker cluster, achieving ~4.4 jobs/sec throughput
+> at 925ms p95 latency, and used per-phase timing instrumentation to identify Docker container
+> startup (82.7% of execution time) as the primary throughput bottleneck over code execution or
+> database writes.
+
+Optionally pair with a second bullet on the debugging story:
+
+> Diagnosed and fixed a distributed race condition between job-recovery ordering and worker claim
+> logic that caused silent job loss during worker crash recovery, verified via a purpose-built
+> failure-injection benchmark (`docker kill` on a live worker) — improved crash-recovery success
+> rate from ~89% to 100% across repeated runs.
+
+---
+
+## Interview Questions You Will Almost Certainly Get (with where the answer lives)
+
+| Question | Answer location |
+|---|---|
+| Why Redis Lists over Streams/Kafka for the work queue? | [design-decisions.md §1](../docs/design-decisions.md) |
+| Why `BRPOPLPUSH` specifically? | [design-decisions.md §2](../docs/design-decisions.md), Q4 below |
+| Why Docker instead of Firecracker/VMs? | [design-decisions.md §4](../docs/design-decisions.md) |
+| Why PostgreSQL instead of MongoDB? | [design-decisions.md §7](../docs/design-decisions.md) |
+| Why was Docker startup ~83% of runtime? | [BENCHMARK_RESULTS.md](../BENCHMARK_RESULTS.md) Docker Spawn Profiling |
+| How would you eliminate that bottleneck? | "What Would You Build Next?" below |
+| Explain the race condition you found. How did you debug it? | "Lead With This" section above + [failure-analysis/02-reaper-requeue-race-condition.md](failure-analysis/02-reaper-requeue-race-condition.md), Q5a below |
+| Why is recovery ~19–25 seconds? Why heartbeat TTL = 15s? | [design-decisions.md §5](../docs/design-decisions.md) |
+| What happens if Redis crashes during recovery? | [design-decisions.md §11](../docs/design-decisions.md) |
+| Why `ON CONFLICT DO UPDATE`? | [design-decisions.md §8](../docs/design-decisions.md) |
+| What delivery guarantee does your system provide? | Q2 below (at-least-once, not exactly-once) |
+| Why did your throughput numbers change between runs? | Q5b below |
+| Is 2.6ms DB write time realistic for production? | Q5c below |
+| Why a 2-second sleep in the crash-recovery test? | Q5d below |
+
+---
+
 ## 5-Minute System Walk (Memorise This Structure)
 
 > "The system is a distributed code execution platform — think a lightweight LeetCode backend.
@@ -60,6 +110,50 @@ These answers are technically precise. Say them calmly, not defensively.
 > that haven't been written to Postgres yet are lost. For a system that needed replay or
 > guaranteed durability across Redis restarts, Kafka would be the right choice."
 
+### Q5a — "Tell me about a bug you found and fixed."
+
+> "While writing a benchmark that kills a worker mid-execution to test crash recovery, I found it
+> reliably lost 1 out of 9 jobs — not randomly, same pattern every run. I traced the job through
+> every system that touches it — API, Redis, Postgres, worker logs — instead of guessing, and found
+> the reaper was pushing a recovered job to Redis before updating its status in Postgres. A fast
+> surviving worker could pop the job from Redis and run its claim query in the small gap before that
+> Postgres update committed, see a stale status, and silently discard the job as 'already claimed by
+> someone else.' I fixed it two ways: reordered the reaper to commit Postgres first, and — more
+> importantly — hardened the worker so a rejected claim on a non-terminal job gets requeued instead
+> of discarded, since reordering alone can't fully close a race between two systems with no shared
+> transaction. Reran the benchmark and got 9/9, 100%, repeatably. Full writeup with the actual
+> debugging steps: `docs/failure-analysis/02-reaper-requeue-race-condition.md`."
+
+### Q5b — "Why did your throughput numbers change between benchmark runs?"
+
+> "Run-to-run variance is expected on a shared dev host — Docker on WSL2 is sensitive to page
+> cache state, host CPU contention from other processes, and whether the Docker daemon is cold
+> or warm. An early 9-job run showed ~5 jobs/sec; a later 9-job run of the same scenario showed
+> ~3.95 jobs/sec. That's exactly why n=9 isn't a reliable sample on its own — it's why I added the
+> 500-job sustained-load scenario. Over 500 jobs and 114 seconds, that variance averages out, and
+> the result that matters is that p95 (925ms) tracks p50 (714ms) tightly the entire time — no
+> drift, no memory-leak signature, no queue starvation building up under sustained load. That's a
+> claim I can defend with data; a single small run's throughput number is not."
+
+### Q5c — "Your DB write is 2.6ms — is that realistic?"
+
+> "That number is accurate for what it measures: a local Postgres instance on the same host as the
+> worker, no network hop. It's a fair measurement of the database's own commit cost, but it
+> understates what a production deployment would see — a managed Postgres (RDS, Cloud SQL) on a
+> separate host adds real network round-trip latency on top of that. I'd expect a few extra
+> milliseconds in a real deployment, not a fundamentally different number, since 2.6ms is Postgres
+> doing genuinely small work (one INSERT, one UPDATE, both indexed by primary key)."
+
+### Q5d — "Why specifically a 2-second sleep in the crash-recovery test?"
+
+> "It's a deliberate choice, not an arbitrary one. The test needs the killed worker to be
+> genuinely mid-execution — not still queued, not already finished — at the exact moment
+> `docker kill` fires, so the benchmark actually exercises the orphan-recovery path instead of
+> getting lucky or unlucky with timing. A 1.5-second delay before the kill, combined with a
+> 2-second job runtime, gives a reliable window where the worker has already claimed the job and
+> is actively running it. Short enough to keep the benchmark fast, long enough to be deterministic
+> across repeated runs — I wasn't willing to rely on a race with the job's actual completion time."
+
 ### Q5 — "How do your memory metrics work? Are they accurate?"
 
 > "Yes, they are highly accurate and race-free. In the initial prototype, we polled `docker stats --no-stream` 
@@ -86,9 +180,10 @@ These answers are technically precise. Say them calmly, not defensively.
 ## What Would You Build Next?
 
 > "The highest-value next step is replacing per-job Docker spawning with a pre-warmed container
-> pool. Every job currently pays 100–300ms just to boot a container before a single line of user
-> code runs. A pool of idle containers eliminates that latency entirely. Every other improvement —
-> Redis Sentinel, distributed tracing, better memory metrics — is operational hardening. The
+> pool. I measured this precisely — container spawn averages 374.7ms and accounts for 82.7% of
+> total execution time per job, versus 65ms for the actual code and 2.6ms for the DB write. A pool
+> of idle containers eliminates that latency entirely. Every other improvement — Redis Sentinel,
+> distributed tracing, better memory metrics — is operational hardening. The
 > container pool is the one thing that directly improves user-perceived performance."
 
 ---
@@ -150,7 +245,11 @@ System Monitor (reaper loop, every 10s)
 | Heartbeat TTL | 15 seconds |
 | Heartbeat interval | 5 seconds |
 | Rate limit | 30 req/min/IP |
-| Container cold-start overhead | ~100–300 ms |
+| Docker container spawn (measured, avg) | 374.7 ms — **82.7%** of total execution time |
+| Code runtime (measured, avg) | 65.0 ms — 14.3% of total execution time |
+| DB transaction commit (measured, avg) | 2.6 ms — 0.6% of total execution time |
+| Sustained throughput (3 workers, 500-job run) | ~4.3 jobs/sec, p95 = 925 ms |
+| Worker-crash recovery (measured) | 19.0 s (theoretical worst case ~25s), 100% success rate |
 
 ---
 
