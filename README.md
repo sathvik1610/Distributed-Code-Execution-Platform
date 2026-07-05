@@ -2,76 +2,73 @@
 
 A distributed backend platform for safely executing untrusted Python and JavaScript code inside isolated Docker sandboxes. The system accepts code through a REST API, queues execution work through Redis, runs jobs on horizontally scalable worker containers, streams stdout/stderr over WebSockets, stores results in PostgreSQL, and recovers jobs when workers crash.
 
-This project is designed as a systems/backend engineering project: it demonstrates queues, workers, sandboxing, fault recovery, live streaming, observability, and failure testing.
+Built as a systems/backend engineering project — queues, workers, sandboxing, fault recovery, live streaming, observability, and failure testing, not just "run some code."
 
 ---
 
 ## Table of Contents
 
-- [Project Goal](#project-goal)
+- [Quick Start](#quick-start)
+- [Web UI](#web-ui)
 - [What This System Does](#what-this-system-does)
 - [Architecture](#architecture)
 - [Technology Stack](#technology-stack)
-- [How The System Works](#how-the-system-works)
-- [Reliability Improvements](#reliability-improvements)
 - [Benchmark](#benchmark)
-- [Setup](#setup)
-- [Running The Platform](#running-the-platform)
-- [Web UI](#web-ui)
-- [Using The API](#using-the-api)
-- [Testing](#testing)
-- [Observability](#observability)
 - [Project Structure](#project-structure)
-- [Why This Project Matters](#why-this-project-matters)
+- [Current Limitations](#current-limitations)
+- [Further Reading](#further-reading)
 
 ---
 
-## Project Goal
+## Quick Start
 
-The goal is to build the backend of a small online code execution engine, similar to the execution layer behind platforms like coding interview tools, online judges, or programming sandboxes.
+**Prerequisites:** Node.js 20+, Docker + Docker Compose. On Windows, run Docker Desktop with the WSL2 backend.
 
-The platform must be able to:
+```bash
+# 1. Install
+git clone <this-repo>
+cd Distributed-Code-Execution-Platform
+npm ci
 
-- accept user-submitted code,
-- execute it safely,
-- stream output live,
-- save final results,
-- handle dangerous programs,
-- scale across multiple workers,
-- recover jobs after worker crashes,
-- expose useful operational metrics.
+# 2. Build (TypeScript packages + sandbox runner images + service images)
+npm run build
+npm run docker:build:runners
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml build
 
-The important part is not just running code. The important part is running untrusted code safely and reliably.
+# 3. Start the backend (Postgres, Redis, API Gateway, System Monitor, 3 workers)
+npm run start:all:scaled
+curl http://localhost:8000/health   # → {"status":"OK",...}
+
+# 4. Stop
+npm run stop:all
+```
+
+If `docker ps` fails with a permission error on WSL/Linux: `sudo usermod -aG docker $USER && newgrp docker` (then `wsl --shutdown` on Windows and reopen).
+
+---
+
+## Web UI
+
+A browser client lives in `apps/web` — Monaco code editor, language selector, live streamed output, status progression, execution metrics, and job history.
+
+```bash
+npm run dev:web   # with the backend already running
+```
+
+Open **http://localhost:5173**. No `.env` needed — the dev server proxies API calls and injects the API key server-side, so it never reaches the browser.
 
 ---
 
 ## What This System Does
 
-A user submits code like this:
-
 ```json
-{
-  "language": "python",
-  "code": "print('hello from sandbox')"
-}
+POST /submissions
+{ "language": "python", "code": "print('hello from sandbox')" }
 ```
 
-The platform then:
+The platform validates the request, stores it in PostgreSQL, enqueues it in Redis, runs it in a locked-down Docker container, streams stdout/stderr live over WebSocket, persists the result, recovers the job if its worker crashes, and exposes metrics via Prometheus/Grafana.
 
-1. validates the request,
-2. stores the submission in PostgreSQL,
-3. enqueues a job in Redis,
-4. lets an execution worker claim the job,
-5. runs the code in a locked-down Docker container,
-6. streams stdout/stderr over WebSockets,
-7. stores the final result in PostgreSQL,
-8. recovers the job if the worker crashes,
-9. exposes metrics through Prometheus and Grafana.
-
-Supported languages:
-
-- Python
-- JavaScript
+Supported languages: **Python**, **JavaScript**.
 
 ---
 
@@ -79,602 +76,50 @@ Supported languages:
 
 ```text
 Client
-  |
-  | REST / WebSocket
+  |  REST / WebSocket
   v
-API Gateway
-  |  - validates requests and API key
-  |  - writes submissions to PostgreSQL
-  |  - pushes jobs into Redis
-  |  - streams output to WebSocket clients
-  |
+API Gateway  →  validates, writes to PostgreSQL, pushes to Redis, streams output
   v
-Redis
-  |  - pending job queue
-  |  - per-worker processing queues
-  |  - live/replayable output streams
-  |  - worker heartbeat keys
-  |
+Redis  →  pending queue, per-worker processing queues, output streams, heartbeats
   v
-Execution Workers
-  |  - atomically claim jobs
-  |  - run Docker sandbox containers
-  |  - publish stdout/stderr chunks
-  |  - persist final results
-  |
+Execution Workers  →  claim jobs, run Docker sandboxes, publish output, persist results
   v
-Docker Sandbox Containers
-  |  - no network
-  |  - memory limit
-  |  - process limit
-  |  - CPU limit
-  |  - read-only filesystem
-  |  - non-root user
+Docker Sandbox  →  no network, memory/CPU/pid limits, read-only fs, non-root user
 
-System Monitor
-  |  - watches worker heartbeats
-  |  - detects dead workers
-  |  - requeues orphaned jobs
-  |  - sends exhausted jobs to DLQ
-
-PostgreSQL
-  |  - durable submission metadata
-  |  - execution results
-  |  - status history
-
-Prometheus + Grafana
-  |  - metrics and dashboards
+System Monitor  →  watches heartbeats, detects dead workers, requeues orphaned jobs
+PostgreSQL      →  durable submissions, results, status history
+Prometheus/Grafana → metrics and dashboards
 ```
 
-For a detailed architecture explanation, see [docs/architecture.md](docs/architecture.md).
-
-For the full Mermaid diagram (job lifecycle, sequence, Redis key map), see [docs/architecture-diagram.md](docs/architecture-diagram.md).
+Full request-flow diagrams: [docs/architecture.md](docs/architecture.md) and [docs/architecture-diagram.md](docs/architecture-diagram.md). Step-by-step lifecycle walkthrough: [docs/how-it-works.md](docs/how-it-works.md).
 
 ---
 
 ## Technology Stack
 
-| Area | Technology | Purpose |
-|---|---|---|
-| API server | Node.js, TypeScript, Fastify | HTTP API and WebSocket gateway |
-| Queue and coordination | Redis | Job queue, processing queues, heartbeats, stream replay |
-| Database | PostgreSQL | Durable submission and result storage |
-| Sandboxing | Docker | Isolated execution environment for untrusted code |
-| Worker runtime | Node.js, TypeScript | Distributed job execution workers |
-| Monitoring service | Node.js, TypeScript | Dead-worker detection and job recovery |
-| Metrics | Prometheus, prom-client | Service and job metrics |
-| Dashboards | Grafana | Visual monitoring |
-| Logging | Pino | Structured service logs |
-| Load testing | k6 | Concurrent traffic tests |
-
----
-
-## How The System Works
-
-### 1. Submission
-
-The client sends code to:
-
-```http
-POST /submissions
-```
-
-The API Gateway creates a row in PostgreSQL with status:
-
-```text
-PENDING
-```
-
-Then it pushes a job payload into Redis:
-
-```text
-jobs:queue:pending
-```
-
-### 2. Queueing With Redis
-
-Redis is used as a fast queue and coordination layer.
-
-The main queue is:
-
-```text
-jobs:queue:pending
-```
-
-Each worker also has its own in-flight queue:
-
-```text
-jobs:queue:processing:<workerId>
-```
-
-This matters because jobs should not disappear if a worker crashes.
-
-### 3. Atomic Job Claim With BRPOPLPUSH
-
-Workers claim jobs using Redis `BRPOPLPUSH`.
-
-In simple terms, `BRPOPLPUSH` means:
-
-```text
-Wait until a job exists,
-remove it from the pending queue,
-place it into this worker's processing queue,
-do that move atomically.
-```
-
-The job moves from:
-
-```text
-jobs:queue:pending
-```
-
-to:
-
-```text
-jobs:queue:processing:<workerId>
-```
-
-Why this is important:
-
-- If a worker uses a normal pop and then crashes, the job can be lost.
-- With `BRPOPLPUSH`, the job is still visible in the processing queue.
-- The System Monitor can recover it later.
-
-This gives the platform at-least-once job delivery.
-
-### 4. Worker Execution
-
-Once a worker claims a job, it:
-
-1. updates the database status to `RUNNING`,
-2. starts a Docker sandbox container,
-3. sends the user code into the container through stdin,
-4. listens for stdout/stderr,
-5. stores output chunks in Redis Streams,
-6. publishes chunks live to WebSocket clients,
-7. saves the final result in PostgreSQL,
-8. removes the job from its processing queue.
-
-### 5. Docker Sandbox
-
-User code is never run directly on the host machine.
-
-It runs inside a Docker container with restrictions:
-
-| Restriction | Purpose |
+| Area | Technology |
 |---|---|
-| `--network none` | Code cannot access the network |
-| `--memory 128m` | Code cannot consume unlimited memory |
-| `--memory-swap 128m` | Swap is disabled |
-| `--pids-limit 50` | Fork bombs are contained |
-| `--cpus 1` | CPU usage is bounded |
-| `--read-only` | Root filesystem cannot be modified |
-| `--user runner` | Code runs as a non-root user |
-| `--cap-drop ALL` | Linux capabilities are removed |
-| `--security-opt no-new-privileges` | Prevents privilege escalation |
-| `--tmpfs /tmp` | Only `/tmp` is writable and memory-backed |
-
-The code is sent over stdin and written to `/tmp` inside the container. No source file needs to be staged on the host filesystem.
-
-### 6. Live Output Streaming
-
-When the sandbox prints output, the worker sends chunks to Redis.
-
-The API Gateway forwards those chunks to WebSocket clients connected to:
-
-```http
-GET /stream/:jobId
-```
-
-The platform also stores recent chunks in Redis Streams, so a client that connects late can replay previous output and still receive the completion marker.
-
-### 7. Result Persistence
-
-PostgreSQL stores the final result:
-
-- exit code,
-- stdout,
-- stderr,
-- error message,
-- error category,
-- execution time,
-- memory used,
-- output truncation flags.
-
-The result write and status update happen inside a database transaction. This keeps submission state and execution output consistent.
-
-### 8. Worker Heartbeats And Crash Recovery
-
-Each worker writes a heartbeat key to Redis:
-
-```text
-worker:heartbeat:<workerId>
-```
-
-The heartbeat has a short TTL and is refreshed regularly.
-
-The System Monitor scans:
-
-```text
-worker:heartbeat:*
-jobs:queue:processing:*
-```
-
-If it sees a processing queue whose worker heartbeat is gone, it knows that worker died.
-
-Then it:
-
-1. reads the orphaned job,
-2. increments `retryCount`,
-3. moves the job back to the pending queue,
-4. lets another worker execute it.
-
-If a job exceeds the retry limit, it goes to the Dead Letter Queue.
-
-### 9. Dead Letter Queue
-
-The Dead Letter Queue stores jobs that failed too many infrastructure recovery attempts.
-
-Redis key:
-
-```text
-jobs:queue:dead-letter
-```
-
-This prevents broken jobs from being retried forever.
-
----
-
-## Reliability Improvements
-
-The following reliability mechanisms are implemented (beyond the basic distributed queue):
-
-### Redis AOF Persistence
-
-Redis is configured with `--appendonly yes --appendfsync everysec`. Every write is synced to disk at most once per second. On Redis restart, the AOF log is replayed and the queue is restored. Maximum data loss on a hard crash: 1 second.
-
-### Startup Queue Recovery
-
-On every system-monitor startup, `recoverOrphanedJobsOnStartup()` runs before the first reaper scan:
-
-1. Resets all `RUNNING` jobs to `PENDING` — any job in RUNNING state without an active worker is permanently stuck, so it is safely reset.
-2. If the Redis pending queue is empty but PostgreSQL has `PENDING` jobs, re-enqueues them all — covers the Redis-restart-with-data-loss scenario even when AOF didn't flush in time.
-
-### Distributed Reaper Lock
-
-If multiple system-monitor replicas run simultaneously, both could detect the same dead worker and double-enqueue its jobs. A distributed lock (`SET reaper:lock {uuid} NX PX 15000`) ensures only one monitor instance runs the scan at a time. The lock is released atomically via a Lua script that checks ownership before deletion.
-
-### Graceful Worker Shutdown
-
-Workers handle `SIGTERM` and `SIGINT` by setting `shouldRun = false`. The current job finishes completely — including the DB transaction and processing queue acknowledgement — before the process exits. Docker Compose sends `SIGTERM` on `docker compose stop`, so workers drain cleanly.
+| API server | Node.js, TypeScript, Fastify |
+| Frontend | React, TypeScript, Vite, Monaco Editor |
+| Queue and coordination | Redis (BRPOPLPUSH, Streams, Pub/Sub) |
+| Database | PostgreSQL |
+| Sandboxing | Docker |
+| Metrics / Dashboards | Prometheus, Grafana |
+| Logging | Pino |
+| Load testing | k6 |
 
 ---
 
 ## Benchmark
 
-All benchmark numbers — throughput, latency, Docker spawn profiling, and worker crash recovery — live in one file: [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md). Hardware specs and stated limitations are included there too.
-
-Run the benchmark after starting the full stack:
+~4.3 jobs/sec sustained throughput, p95 latency 925ms over 500 jobs. Docker container spawn is **~83% of total execution time** — the throughput ceiling is the Docker daemon's spawn rate, not application logic. 100% crash-recovery success rate (a real race condition was found and fixed along the way — see [docs/reliability.md](docs/reliability.md)).
 
 ```bash
-npm run start:all:scaled   # 3 workers
-node benchmark.js
+node benchmark.js                                              # throughput/latency/spawn profiling
+KILL_DELAY_MS=1500 RECOVERY_TIMEOUT_MS=60000 node failure-benchmark.js   # crash recovery
 ```
 
-Metrics captured:
-- End-to-end latency (submit → COMPLETED): avg, p50, p95, p99, min, max
-- Throughput (jobs/sec)
-- Three scenarios: optimal queue balance (9 jobs, concurrency=3), queue saturation (20 jobs, concurrency=10), and sustained load (500 jobs, concurrency=3)
-- Docker spawn profiling — every job's execution time is broken into `containerInitMs` (spawn → first output), `codeRuntimeMs` (first output → exit), and `dbWriteMs` (transaction commit)
-
-**Measured results (3 workers, WSL2):** ~4.3 jobs/sec sustained throughput, p95 latency 925ms over 500 jobs. Docker container spawn accounts for **~83% of total execution time** — the platform's throughput ceiling is the Docker daemon's spawn rate, not application logic.
-
-> **Note:** Run the benchmark after the stack is warm (the script includes a warm-up job). Results vary by host — Docker spawn time (~350–500ms) dominates latency on a single machine.
-
-### Worker Crash Recovery Benchmark
-
-Verifies the reaper's dead-worker detection and job recovery end-to-end by killing a worker mid-execution:
-
-```bash
-npm run start:all:scaled
-KILL_DELAY_MS=1500 RECOVERY_TIMEOUT_MS=60000 node failure-benchmark.js
-```
-
-**Measured: 100% job completion** (9/9 jobs, 1 retried) after killing a worker mid-execution, recovered automatically in ~19s (within the ~25s worst-case window: 15s heartbeat TTL + 10s reaper scan interval). Full numbers and recovery timeline in [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md).
-
----
-
-## Setup
-
-### Prerequisites
-
-Install:
-
-- Node.js 20+
-- npm
-- Docker
-- Docker Compose
-- WSL2 Ubuntu if running on Windows
-
-On WSL/Linux, your user must be able to run Docker without `sudo`:
-
-```bash
-docker ps
-```
-
-If this fails with a permission error, add your user to the Docker group:
-
-```bash
-sudo usermod -aG docker $USER
-newgrp docker
-```
-
-On Windows, you may need to restart WSL after changing Docker permissions:
-
-```powershell
-wsl --shutdown
-```
-
-### Install Dependencies
-
-```bash
-npm ci
-```
-
-### Build TypeScript Packages
-
-```bash
-npm run build
-```
-
-### Build Runner Images
-
-The execution workers expect these local Docker images:
-
-```bash
-npm run docker:build:runners
-```
-
-This creates:
-
-```text
-runner-python
-runner-javascript
-```
-
-### Build Service Images
-
-On a fresh machine, build the Docker Compose service images before starting the stack:
-
-```bash
-docker compose -f infra/docker-compose.yml -f infra/docker-compose.services.yml build
-```
-
----
-
-## Running The Platform
-
-### Start Everything
-
-```bash
-npm run start:all:scaled
-```
-
-This starts:
-
-- PostgreSQL
-- Redis
-- Prometheus
-- Grafana
-- Docker Socket Proxy
-- API Gateway
-- System Monitor
-- 3 Execution Workers
-
-### Check Health
-
-```bash
-curl http://localhost:8000/health
-```
-
-Expected:
-
-```json
-{
-  "status": "OK",
-  "service": "api-gateway"
-}
-```
-
-### Stop Everything
-
-```bash
-npm run stop:all
-```
-
----
-
-## Web UI
-
-A browser-based client lives in `apps/web` — Monaco code editor, language selector, live streamed output, status progression (Pending → Running → Completed/Failed/Timeout), execution metrics (exit code, time, memory), and a per-browser job history.
-
-### Run It
-
-With the backend already running (see above):
-
-```bash
-npm run dev:web
-```
-
-Open **http://localhost:5173**.
-
-No `.env` file is required for local dev — the dev server proxies `/submissions`, `/stream`, `/dlq`, and `/health` straight through to the API Gateway on `localhost:8000`, and injects the `X-API-Key` header itself so the key never reaches the browser. The default dev key (`test-api-key`) matches the backend's default in `infra/docker-compose.services.yml`. To point at a different backend or key, set `API_TARGET` / `DEV_API_KEY` env vars before running `npm run dev:web`.
-
-### Try It
-
-Three example snippets are built in (Hello World, Syntax Error, Infinite Loop) for both Python and JavaScript — pick one from the toolbar and hit **Run** to see the full pipeline: submission → live stdout/stderr streaming over WebSocket → final status, exit code, execution time, and memory usage once the job completes.
-
-### Production Build
-
-```bash
-npm run build --workspace=apps/web
-```
-
-Outputs a static bundle to `apps/web/dist`. There's no Docker/reverse-proxy setup for the web UI yet (backend-only Docker Compose today) — that's the next planned step; for now, the web UI is a local-dev tool that talks to the Dockerized backend.
-
----
-
-## Using The API
-
-The default local API key in Docker Compose is:
-
-```text
-test-api-key
-```
-
-### Submit Python Code
-
-```bash
-curl -X POST http://localhost:8000/submissions \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: test-api-key" \
-  -d '{
-    "language": "python",
-    "code": "print([x * 2 for x in range(5)])"
-  }'
-```
-
-Response:
-
-```json
-{
-  "jobId": "uuid",
-  "status": "PENDING"
-}
-```
-
-### Fetch Result
-
-```bash
-curl -H "X-API-Key: test-api-key" \
-  http://localhost:8000/submissions/<jobId>
-```
-
-### Run A Local File
-
-```bash
-node run-file.js sample.py
-node run-file.js sample.js
-```
-
-### WebSocket Stream
-
-Connect to:
-
-```text
-ws://localhost:8000/stream/<jobId>
-```
-
-The WebSocket must include:
-
-```text
-X-API-Key: test-api-key
-```
-
----
-
-## API Reference
-
-| Method | Path | Description | Auth |
-|---|---|---|---|
-| `GET` | `/health` | Health check | No |
-| `POST` | `/submissions` | Submit code | Yes |
-| `GET` | `/submissions/:id` | Fetch one result | Yes |
-| `GET` | `/submissions?page=1&limit=10&status=COMPLETED` | List submissions | Yes |
-| `GET` | `/stream/:jobId` | WebSocket output stream | Yes |
-| `GET` | `/dlq` | Inspect dead-letter jobs | Yes |
-| `DELETE` | `/dlq/:jobId` | Remove a dead-letter job | Yes |
-
----
-
-## Testing
-
-### Type Check
-
-```bash
-npm run typecheck
-```
-
-### Failure And Regression Suite
-
-```bash
-npm run test:failure
-```
-
-The suite validates:
-
-1. infinite loop timeout,
-2. fork bomb containment,
-3. memory exhaustion containment,
-4. infinite output stream cap,
-5. worker crash recovery,
-6. API/WebSocket regressions.
-
-Expected summary:
-
-```text
-PASSED: 6
-FAILED: 0
-```
-
-### What The Tests Prove
-
-| Test | What It Proves |
-|---|---|
-| Infinite loop | Worker timeout kills runaway CPU loops |
-| Fork bomb | Docker PID limit prevents process exhaustion |
-| OOM attack | Docker memory limit kills memory abuse |
-| Infinite output | Output cap prevents stream/memory blowup |
-| Worker crash | Heartbeat monitor recovers orphaned jobs |
-| API/WebSocket regression | Auth, replay, validation, output flags work |
-
----
-
-## Observability
-
-### Prometheus
-
-```text
-http://localhost:9090
-```
-
-Prometheus scrapes:
-
-- API Gateway metrics on `:9100`
-- Execution Worker metrics on `:9101`
-- System Monitor metrics on `:9102`
-
-### Grafana
-
-```text
-http://localhost:3000
-```
-
-Default login:
-
-```text
-admin / admin
-```
-
-Grafana includes dashboards for:
-
-- queue depth,
-- job throughput,
-- execution duration,
-- WebSocket activity,
-- DLQ count,
-- worker recovery events,
-- rate-limit hits.
+Full numbers, hardware specs, and stated limitations: **[BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md)**.
 
 ---
 
@@ -682,85 +127,42 @@ Grafana includes dashboards for:
 
 ```text
 .
-├── apps/
-│   └── web/                             # Browser UI — Monaco editor, live streaming, job history
-│
-├── infra/
-│   ├── docker-compose.yml              # Postgres, Redis, Prometheus, Grafana
-│   ├── docker-compose.services.yml     # API, workers, monitor, Docker proxy
-│   ├── schema.sql                      # PostgreSQL schema
-│   └── prometheus.yml                  # Prometheus scrape config
-│
-├── runners/
-│   ├── python/                         # Python sandbox image
-│   └── javascript/                     # JavaScript sandbox image
-│
+├── apps/web/            # Browser UI — Monaco editor, live streaming, job history
+├── infra/               # Docker Compose files, Postgres schema, Prometheus config
+├── runners/             # Python & JavaScript sandbox images
 ├── services/
-│   ├── api-gateway/                    # Fastify REST/WebSocket API
-│   ├── execution-worker/               # Redis worker + Docker sandbox runner
-│   └── system-monitor/                 # Heartbeat scanner + orphan reaper
-│
-├── shared/
-│   ├── contracts/                      # Shared types, statuses, queue keys, constants
-│   ├── logger/                         # Pino logger
-│   └── metrics/                        # Prometheus metrics
-│
-├── tests/failure/                      # Live failure and regression tests
-├── run-file.js                         # Submit and stream a local file
-├── test-ws.js                          # WebSocket demo client
-├── benchmark.js                        # Benchmark helper
-└── load-test.js                        # Load test helper
+│   ├── api-gateway/     # Fastify REST/WebSocket API
+│   ├── execution-worker/# Redis worker + Docker sandbox runner
+│   └── system-monitor/  # Heartbeat scanner + orphan reaper
+├── shared/              # Contracts, logger, metrics (shared across services + web UI)
+├── tests/failure/       # Live failure and regression tests
+├── benchmark.js / failure-benchmark.js
 ```
-
----
-
-## Why This Project Matters
-
-This project is meaningful because it combines several real backend engineering ideas in one system:
-
-- distributed workers,
-- atomic queue operations,
-- crash recovery,
-- sandboxed execution,
-- resource isolation,
-- WebSocket streaming,
-- durable result storage,
-- observability,
-- failure testing.
-
-It is intentionally more advanced than a CRUD application. It demonstrates practical systems engineering: what happens when a worker dies, when code prints forever, when memory explodes, when a process fork-bombs, or when a client connects late to a stream.
-
----
-
-## Design Decisions
-
-For the full reasoning behind every architectural choice (why Redis over RabbitMQ, why BRPOPLPUSH, why spawn over exec, why Docker, why separate result table, why the 15-second heartbeat TTL, etc.), see [docs/design-decisions.md](docs/design-decisions.md).
 
 ---
 
 ## Current Limitations
 
-This is a local/demo-scale platform, not a production service. Known gaps:
+This is a local/demo-scale platform, not a production service.
 
 | Gap | Notes |
 |---|---|
 | Single API key | No per-user auth — JWT or per-user keys would be the fix |
-| No seccomp profile | Syscall abuse not blocked; `--cap-drop ALL` helps but doesn't cover everything |
-| Single Redis instance | No HA — Redis Sentinel or Cluster for production |
-| Single PostgreSQL | No replication — streaming replica for production |
-| No job cancellation | Jobs run to completion or timeout; `DELETE /submissions/:id` not implemented |
-| No autoscaling | Worker count is set manually via `--scale`; Kubernetes HPA on queue depth would be the production approach |
+| No seccomp profile | Syscall abuse not fully blocked; `--cap-drop ALL` helps but doesn't cover everything |
+| Single Redis / single PostgreSQL | No HA or replication |
+| No job cancellation | Jobs run to completion or timeout |
+| No autoscaling | Worker count set manually via `--scale` |
 
 ---
 
-## Useful Commands
+## Further Reading
 
-```bash
-npm ci                         # install dependencies
-npm run build                  # build all TypeScript packages
-npm run typecheck              # run TypeScript checks
-npm run docker:build:runners   # build sandbox runner images
-npm run start:all:scaled       # start full stack with 3 workers
-npm run test:failure           # run live failure/regression tests
-npm run stop:all               # stop all services
-```
+| Doc | Covers |
+|---|---|
+| [docs/how-it-works.md](docs/how-it-works.md) | Full submission lifecycle: queueing, atomic claim, sandboxing, streaming, crash recovery, DLQ |
+| [docs/reliability.md](docs/reliability.md) | AOF persistence, startup recovery, distributed reaper lock, graceful shutdown |
+| [docs/design-decisions.md](docs/design-decisions.md) | Why Redis over RabbitMQ, why BRPOPLPUSH, why Docker, why Postgres over Mongo, etc. |
+| [docs/api-reference.md](docs/api-reference.md) | Endpoint table, curl examples, WebSocket usage |
+| [docs/testing.md](docs/testing.md) | Failure/regression suite, what each test proves |
+| [docs/observability.md](docs/observability.md) | Prometheus/Grafana setup and dashboards |
+| [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) | All measured numbers, hardware specs, limitations |
