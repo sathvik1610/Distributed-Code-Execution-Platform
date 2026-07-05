@@ -1,4 +1,9 @@
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const API_KEY = process.env.API_KEY || 'test-api-key';
 const HOST = 'localhost';
@@ -161,27 +166,96 @@ async function runBenchmark(label, totalJobs, concurrency) {
   return stats;
 }
 
+function saveResultsToMarkdown(results, workerCount) {
+  const now = new Date().toISOString().replace('T', ' ').split('.')[0] + ' UTC';
+  const os = process.platform + ' / Node.js ' + process.version;
+
+  const rows = results.map(({ label, jobs, concurrency, stats }) => {
+    return [
+      `### ${label}`,
+      `- **Jobs submitted:** ${jobs}`,
+      `- **Client concurrency:** ${concurrency}`,
+      `- **Throughput:** ${stats.throughput} jobs/sec`,
+      `- **Latency avg:** ${stats.avg} ms`,
+      `- **Latency p50:** ${stats.p50} ms`,
+      `- **Latency p95:** ${stats.p95} ms`,
+      `- **Latency p99:** ${stats.p99} ms`,
+      `- **Latency min/max:** ${stats.min} ms / ${stats.max} ms`,
+    ].join('\n');
+  }).join('\n\n');
+
+  const md = `# Benchmark Results
+
+> Run: ${now}
+> Workers: ${workerCount} execution-worker replicas
+> Language: Python (simple print statement — measures end-to-end latency, not execution time)
+> Host: ${os}
+
+## How to read these numbers
+
+- **Latency** = time from HTTP submission to final \`COMPLETED\` status (includes queue wait + Docker spawn + execution + DB write)
+- **Throughput** = completed jobs per second over the entire run
+- **Concurrency** = number of simultaneous client goroutines submitting + waiting for results
+
+---
+
+${rows}
+
+---
+
+## What these numbers mean
+
+- p50 is your typical user experience
+- p95 is your worst-case tail — anything above this in production needs investigation
+- The gap between Scenario 1 and Scenario 2 throughput shows queue saturation behaviour
+
+## To reproduce
+
+\`\`\`bash
+npm run start:all:scaled       # 3 workers
+node benchmark.js
+\`\`\`
+`;
+
+  // Raw output lands in docs/ (private prep material), not the repo root.
+  // BENCHMARK_RESULTS.md at the root is curated by hand (hardware specs, limitations,
+  // variance notes, crash-recovery section) — this template would blow all of that away
+  // if written there directly. Fold fresh numbers in manually instead.
+  const outPath = path.join(__dirname, 'docs', 'latest-benchmark-raw.md');
+  fs.writeFileSync(outPath, md, 'utf8');
+  console.log(`\n📄 Raw results saved to docs/latest-benchmark-raw.md`);
+}
+
 async function main() {
   console.log('🏁 Distributed Code Execution Platform Benchmark Suite');
   console.log('   Ensure the platform is running (npm run start:all:scaled) before starting.');
   console.log('   Using API Key:', API_KEY ? '••••••••' : 'None (Set API_KEY env var!)');
 
+  const WORKER_COUNT = process.env.WORKER_COUNT || '3';
+
   try {
-    // Warm-up run to bypass initial Docker engine/network link cold-starts
-    console.log('\n🔥 Warming up the engine (1 single execution)...');
+    console.log('\n🔥 Warming up (1 execution to bypass Docker cold-start)...');
     const { jobId, submittedAt } = await submitJob();
     await waitForJob(jobId, submittedAt);
     console.log('✅ Engine warmed up!');
 
-    // Benchmark 1: Concurrency 3 (Optimal distributed load, exactly matches 3 worker processes)
-    // 9 jobs total, meaning each worker gets exactly 3 jobs sequentially
-    const statsOptimal = await runBenchmark('Scenario 1: Optimal Queue Balance (Concurrency=3)', 9, 3);
+    const results = [];
 
-    // Benchmark 2: Concurrency 10 (Slight Queue Saturation)
-    // 20 jobs total, meaning jobs will queue up and wait, showcasing Redis queue distribution
-    const statsSaturated = await runBenchmark('Scenario 2: Slight Queue Saturation (Concurrency=10)', 20, 10);
+    // Scenario 1: one job per worker — baseline throughput with no queue backlog
+    const s1 = await runBenchmark('Scenario 1: Optimal Queue Balance (Concurrency=3)', 9, 3);
+    results.push({ label: 'Scenario 1: Optimal Queue Balance', jobs: 9, concurrency: 3, stats: s1 });
 
-    console.log('🎉 Benchmark Suite Completed successfully!');
+    // Scenario 2: more clients than workers — queue saturation stress test
+    const s2 = await runBenchmark('Scenario 2: Queue Saturation (Concurrency=10)', 20, 10);
+    results.push({ label: 'Scenario 2: Queue Saturation', jobs: 20, concurrency: 10, stats: s2 });
+
+    // Scenario 3: sustained load — 500 jobs, concurrency=3 (matches worker count).
+    // Shows steady-state throughput, p99 under continuous load, and queue distribution across a real workload.
+    const s3 = await runBenchmark('Scenario 3: Sustained Load (500 jobs, Concurrency=3)', 500, 3);
+    results.push({ label: 'Scenario 3: Sustained Load (500 jobs)', jobs: 500, concurrency: 3, stats: s3 });
+
+    console.log('🎉 Benchmark Suite Completed!');
+    saveResultsToMarkdown(results, WORKER_COUNT);
   } catch (err) {
     console.error('❌ Critical Benchmark Failure:', err.message);
   }
