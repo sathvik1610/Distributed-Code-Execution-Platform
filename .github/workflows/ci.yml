@@ -40,6 +40,7 @@ jobs:
           npx tsc --noEmit --project services/api-gateway/tsconfig.json
           npx tsc --noEmit --project services/execution-worker/tsconfig.json
           npx tsc --noEmit --project services/system-monitor/tsconfig.json
+          npx tsc --noEmit --project apps/web/tsconfig.json
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -52,6 +53,7 @@ jobs:
             services/api-gateway/dist
             services/execution-worker/dist
             services/system-monitor/dist
+            apps/web/dist
           retention-days: 1
 
   # ──────────────────────────────────────────────────────────────────────────

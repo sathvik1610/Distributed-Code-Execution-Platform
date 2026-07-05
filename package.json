@@ -13,6 +13,7 @@
     "dev:gateway": "npm run dev --workspace=services/api-gateway",
     "dev:worker": "npm run dev --workspace=services/execution-worker",
     "dev:monitor": "npm run dev --workspace=services/system-monitor",
+    "dev:web": "npm run dev --workspace=apps/web",
     "infra:up": "docker compose -f infra/docker-compose.yml up -d",
     "infra:down": "docker compose -f infra/docker-compose.yml down",
     "infra:logs": "docker compose -f infra/docker-compose.yml logs -f",
@@ -25,7 +26,8 @@
   },
   "workspaces": [
     "services/*",
-    "shared/*"
+    "shared/*",
+    "apps/*"
   ],
   "devDependencies": {
     "@types/node": "^22.16.0",

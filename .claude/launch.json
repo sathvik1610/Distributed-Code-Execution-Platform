@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web",
+      "runtimeExecutable": "wsl",
+      "runtimeArgs": [
+        "-d", "Ubuntu", "--", "bash", "-c",
+        "cd ~/Distributed-Code-Execution-Platform && npm run dev:web"
+      ],
+      "port": 5173
+    }
+  ]
+}
