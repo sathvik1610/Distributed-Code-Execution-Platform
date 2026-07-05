@@ -13,8 +13,11 @@ This project is designed as a systems/backend engineering project: it demonstrat
 - [Architecture](#architecture)
 - [Technology Stack](#technology-stack)
 - [How The System Works](#how-the-system-works)
+- [Reliability Improvements](#reliability-improvements)
+- [Benchmark](#benchmark)
 - [Setup](#setup)
 - [Running The Platform](#running-the-platform)
+- [Web UI](#web-ui)
 - [Using The API](#using-the-api)
 - [Testing](#testing)
 - [Observability](#observability)
@@ -124,6 +127,8 @@ Prometheus + Grafana
 ```
 
 For a detailed architecture explanation, see [docs/architecture.md](docs/architecture.md).
+
+For the full Mermaid diagram (job lifecycle, sequence, Redis key map), see [docs/architecture-diagram.md](docs/architecture-diagram.md).
 
 ---
 
@@ -320,6 +325,65 @@ This prevents broken jobs from being retried forever.
 
 ---
 
+## Reliability Improvements
+
+The following reliability mechanisms are implemented (beyond the basic distributed queue):
+
+### Redis AOF Persistence
+
+Redis is configured with `--appendonly yes --appendfsync everysec`. Every write is synced to disk at most once per second. On Redis restart, the AOF log is replayed and the queue is restored. Maximum data loss on a hard crash: 1 second.
+
+### Startup Queue Recovery
+
+On every system-monitor startup, `recoverOrphanedJobsOnStartup()` runs before the first reaper scan:
+
+1. Resets all `RUNNING` jobs to `PENDING` — any job in RUNNING state without an active worker is permanently stuck, so it is safely reset.
+2. If the Redis pending queue is empty but PostgreSQL has `PENDING` jobs, re-enqueues them all — covers the Redis-restart-with-data-loss scenario even when AOF didn't flush in time.
+
+### Distributed Reaper Lock
+
+If multiple system-monitor replicas run simultaneously, both could detect the same dead worker and double-enqueue its jobs. A distributed lock (`SET reaper:lock {uuid} NX PX 15000`) ensures only one monitor instance runs the scan at a time. The lock is released atomically via a Lua script that checks ownership before deletion.
+
+### Graceful Worker Shutdown
+
+Workers handle `SIGTERM` and `SIGINT` by setting `shouldRun = false`. The current job finishes completely — including the DB transaction and processing queue acknowledgement — before the process exits. Docker Compose sends `SIGTERM` on `docker compose stop`, so workers drain cleanly.
+
+---
+
+## Benchmark
+
+All benchmark numbers — throughput, latency, Docker spawn profiling, and worker crash recovery — live in one file: [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md). Hardware specs and stated limitations are included there too.
+
+Run the benchmark after starting the full stack:
+
+```bash
+npm run start:all:scaled   # 3 workers
+node benchmark.js
+```
+
+Metrics captured:
+- End-to-end latency (submit → COMPLETED): avg, p50, p95, p99, min, max
+- Throughput (jobs/sec)
+- Three scenarios: optimal queue balance (9 jobs, concurrency=3), queue saturation (20 jobs, concurrency=10), and sustained load (500 jobs, concurrency=3)
+- Docker spawn profiling — every job's execution time is broken into `containerInitMs` (spawn → first output), `codeRuntimeMs` (first output → exit), and `dbWriteMs` (transaction commit)
+
+**Measured results (3 workers, WSL2):** ~4.3 jobs/sec sustained throughput, p95 latency 925ms over 500 jobs. Docker container spawn accounts for **~83% of total execution time** — the platform's throughput ceiling is the Docker daemon's spawn rate, not application logic.
+
+> **Note:** Run the benchmark after the stack is warm (the script includes a warm-up job). Results vary by host — Docker spawn time (~350–500ms) dominates latency on a single machine.
+
+### Worker Crash Recovery Benchmark
+
+Verifies the reaper's dead-worker detection and job recovery end-to-end by killing a worker mid-execution:
+
+```bash
+npm run start:all:scaled
+KILL_DELAY_MS=1500 RECOVERY_TIMEOUT_MS=60000 node failure-benchmark.js
+```
+
+**Measured: 100% job completion** (9/9 jobs, 1 retried) after killing a worker mid-execution, recovered automatically in ~19s (within the ~25s worst-case window: 15s heartbeat TTL + 10s reaper scan interval). Full numbers and recovery timeline in [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md).
+
+---
+
 ## Setup
 
 ### Prerequisites
@@ -427,6 +491,36 @@ Expected:
 ```bash
 npm run stop:all
 ```
+
+---
+
+## Web UI
+
+A browser-based client lives in `apps/web` — Monaco code editor, language selector, live streamed output, status progression (Pending → Running → Completed/Failed/Timeout), execution metrics (exit code, time, memory), and a per-browser job history.
+
+### Run It
+
+With the backend already running (see above):
+
+```bash
+npm run dev:web
+```
+
+Open **http://localhost:5173**.
+
+No `.env` file is required for local dev — the dev server proxies `/submissions`, `/stream`, `/dlq`, and `/health` straight through to the API Gateway on `localhost:8000`, and injects the `X-API-Key` header itself so the key never reaches the browser. The default dev key (`test-api-key`) matches the backend's default in `infra/docker-compose.services.yml`. To point at a different backend or key, set `API_TARGET` / `DEV_API_KEY` env vars before running `npm run dev:web`.
+
+### Try It
+
+Three example snippets are built in (Hello World, Syntax Error, Infinite Loop) for both Python and JavaScript — pick one from the toolbar and hit **Run** to see the full pipeline: submission → live stdout/stderr streaming over WebSocket → final status, exit code, execution time, and memory usage once the job completes.
+
+### Production Build
+
+```bash
+npm run build --workspace=apps/web
+```
+
+Outputs a static bundle to `apps/web/dist`. There's no Docker/reverse-proxy setup for the web UI yet (backend-only Docker Compose today) — that's the next planned step; for now, the web UI is a local-dev tool that talks to the Dockerized backend.
 
 ---
 
@@ -588,6 +682,9 @@ Grafana includes dashboards for:
 
 ```text
 .
+├── apps/
+│   └── web/                             # Browser UI — Monaco editor, live streaming, job history
+│
 ├── infra/
 │   ├── docker-compose.yml              # Postgres, Redis, Prometheus, Grafana
 │   ├── docker-compose.services.yml     # API, workers, monitor, Docker proxy
@@ -635,17 +732,24 @@ It is intentionally more advanced than a CRUD application. It demonstrates pract
 
 ---
 
+## Design Decisions
+
+For the full reasoning behind every architectural choice (why Redis over RabbitMQ, why BRPOPLPUSH, why spawn over exec, why Docker, why separate result table, why the 15-second heartbeat TTL, etc.), see [docs/design-decisions.md](docs/design-decisions.md).
+
+---
+
 ## Current Limitations
 
-This is a local/demo-scale platform, not a production service. Important future improvements would include:
+This is a local/demo-scale platform, not a production service. Known gaps:
 
-- per-user authorization instead of a single API key,
-- stronger secret management,
-- digest-pinned base images,
-- multi-file submission support,
-- Redis high availability,
-- PostgreSQL retention/archival policy,
-- more advanced worker metrics discovery when scaling across many hosts.
+| Gap | Notes |
+|---|---|
+| Single API key | No per-user auth — JWT or per-user keys would be the fix |
+| No seccomp profile | Syscall abuse not blocked; `--cap-drop ALL` helps but doesn't cover everything |
+| Single Redis instance | No HA — Redis Sentinel or Cluster for production |
+| Single PostgreSQL | No replication — streaming replica for production |
+| No job cancellation | Jobs run to completion or timeout; `DELETE /submissions/:id` not implemented |
+| No autoscaling | Worker count is set manually via `--scale`; Kubernetes HPA on queue depth would be the production approach |
 
 ---
 

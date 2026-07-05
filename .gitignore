@@ -66,3 +66,9 @@ infra/k6-results/
 # ── Misc ─────────────────────────────────────────────────────────────────────
 .cache/
 tmp/
+
+# ── Ad-hoc benchmark run output ───────────────────────────────────────────────
+# Regenerated every run by benchmark.js / failure-benchmark.js. The curated,
+# hand-edited results live in BENCHMARK_RESULTS.md and docs/ALL_BENCHMARKS.md instead.
+docs/latest-benchmark-raw.md
+docs/failure-analysis/latest-run-raw.md
