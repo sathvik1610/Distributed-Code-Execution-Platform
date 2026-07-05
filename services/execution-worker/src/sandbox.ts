@@ -21,6 +21,9 @@ export interface SandboxResult {
   streamOutputLimitExceeded: boolean;
   executionTimeMs: number;
   memoryUsedBytes: number | null;
+  // Timing breakdown — split the 488ms black box into components
+  containerInitMs: number;  // docker spawn → first byte of output (Docker cold start + image load + runtime init)
+  codeRuntimeMs: number;    // first byte → container exit (actual code execution)
 }
 
 function byteLength(text: string): number {
@@ -147,6 +150,9 @@ export async function runInSandbox(
 
   await removeStaleContainer(containerName, jobId);
 
+  const spawnIssuedAt = performance.now();
+  let firstOutputAt: number | null = null;
+
   const child = spawn('docker', dockerArgs);
 
   const timeoutTimer = setTimeout(() => {
@@ -155,6 +161,7 @@ export async function runInSandbox(
   }, timeoutMs);
 
   const handleOutput = (type: 'stdout' | 'stderr', data: Buffer, accumulator: string): string => {
+    if (firstOutputAt === null) firstOutputAt = performance.now();
     if (streamOutputLimitExceeded) return accumulator;
     let text = data.toString('utf-8');
 
@@ -211,8 +218,16 @@ export async function runInSandbox(
 
     child.on('close', async (code) => {
       clearTimeout(timeoutTimer);
-      const endTime = performance.now();
-      const executionTimeMs = Math.round(endTime - startTime);
+      const containerExitAt = performance.now();
+      const executionTimeMs = Math.round(containerExitAt - startTime);
+
+      // Timing breakdown
+      const containerInitMs = firstOutputAt !== null
+        ? Math.round(firstOutputAt - spawnIssuedAt)
+        : executionTimeMs; // no output → container init covers everything
+      const codeRuntimeMs = firstOutputAt !== null
+        ? Math.round(containerExitAt - firstOutputAt)
+        : 0;
 
       if (code === 137 && !timedOut && !streamOutputLimitExceeded) oomKilled = true;
 
@@ -226,7 +241,9 @@ export async function runInSandbox(
         outputTruncated,
         streamOutputLimitExceeded,
         executionTimeMs,
-        memoryUsedBytes
+        memoryUsedBytes,
+        containerInitMs,
+        codeRuntimeMs
       });
     });
   });

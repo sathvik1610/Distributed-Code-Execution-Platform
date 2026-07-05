@@ -186,7 +186,27 @@ async function processQueue() {
       );
 
       if (dbResult.rows.length === 0) {
-        logger.warn({ jobId: job.jobId }, 'Job already claimed, processed, or in invalid state. Skipping.');
+        // State machine rejected the job. Check why before discarding:
+        // if the job is still non-terminal, re-push to pending so another worker
+        // can retry it. This handles the race between the reaper's requeue
+        // ordering and worker claim timing: a worker can pop a recovered job from
+        // Redis before the reaper's own DB status update has committed, causing
+        // this claim query to see a stale (pre-recovery) status.
+        const statusCheck = await pool.query(
+          'SELECT status FROM submissions WHERE id = $1',
+          [job.jobId]
+        );
+        const currentStatus = statusCheck.rows[0]?.status as SubmissionStatus | undefined;
+        const isTerminal = currentStatus === SubmissionStatus.COMPLETED
+          || currentStatus === SubmissionStatus.FAILED
+          || currentStatus === SubmissionStatus.TIMEOUT;
+
+        if (!isTerminal) {
+          logger.warn({ jobId: job.jobId, currentStatus }, 'State machine race detected — re-queuing job to pending');
+          await redis.lpush(QUEUE_KEYS.PENDING, rawJob);
+        } else {
+          logger.warn({ jobId: job.jobId, currentStatus }, 'Job already claimed, processed, or in invalid state. Skipping.');
+        }
         await redis.lrem(processingQueue, 1, rawJob);
         continue;
       }
@@ -240,6 +260,7 @@ async function processQueue() {
       // if the process crashes mid-transaction, Postgres rolls back automatically,
       // the job stays in the processing queue, and the System Monitor reaper
       // will recover and re-enqueue it safely.
+      const dbWriteStart = performance.now();
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
@@ -276,6 +297,8 @@ async function processQueue() {
         client.release();
       }
 
+      const dbWriteMs = Math.round(performance.now() - dbWriteStart);
+
       // ── Acknowledge: remove from processing queue ───────
       // Only reached if the transaction above committed successfully.
       await redis.lrem(processingQueue, 1, rawJob);
@@ -288,7 +311,17 @@ async function processQueue() {
       if (result.outputTruncated) outputTruncations.inc();
       if (result.streamOutputLimitExceeded) streamOutputLimitHits.inc();
 
-      logger.info({ jobId: job.jobId, status: finalStatus, executionTimeMs: result.executionTimeMs }, 'Job completed');
+      // Timing breakdown log — shows Docker cold-start vs code runtime vs DB write
+      logger.info({
+        jobId: job.jobId,
+        status: finalStatus,
+        timing: {
+          totalMs: result.executionTimeMs,
+          containerInitMs: result.containerInitMs,
+          codeRuntimeMs: result.codeRuntimeMs,
+          dbWriteMs,
+        }
+      }, 'Job completed');
 
     } catch (err) {
       logger.error({ err, jobId: job?.jobId }, 'Unhandled error in worker loop');

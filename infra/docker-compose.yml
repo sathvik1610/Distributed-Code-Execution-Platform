@@ -28,6 +28,10 @@ services:
     restart: always
     ports:
       - "6379:6379"
+    # AOF persistence: every write is synced to disk every second.
+    # Without this, a Redis restart loses the entire pending queue.
+    # appendfsync everysec balances durability (at most 1s of data loss) vs performance.
+    command: redis-server --appendonly yes --appendfsync everysec
     volumes:
       - redis_data:/data
     healthcheck:

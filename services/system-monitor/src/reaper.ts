@@ -22,6 +22,7 @@
  *    Then deletes the now-empty dead worker's processing queue.
  */
 
+import { randomUUID } from 'crypto';
 import { redis } from './redis.js';
 import { pool } from './db.js';
 import { logger } from '@code-execution/logger';
@@ -35,11 +36,23 @@ import {
 
 // ── Scanning Configuration ─────────────────────────────────────────────────
 
-// Pattern to scan for all active processing queues
 const PROCESSING_QUEUE_PATTERN = 'jobs:queue:processing:*';
-
-// Pattern to scan for all active worker heartbeats
 const HEARTBEAT_PATTERN = 'worker:heartbeat:*';
+
+// Distributed lock key — prevents two monitor instances from running concurrent
+// reaper scans and double-requeueing the same orphaned jobs.
+const REAPER_LOCK_KEY = 'reaper:lock';
+const REAPER_LOCK_TTL_MS = 15000; // must outlast the longest expected scan
+
+// Lua script: atomically delete the lock only if we still own it.
+// Prevents releasing a lock that a different monitor instance re-acquired.
+const RELEASE_LOCK_SCRIPT = `
+  if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+  else
+    return 0
+  end
+`;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -178,17 +191,19 @@ async function recoverJobsFromDeadWorker(deadWorkerId: string): Promise<void> {
       // Job has exhausted retries — route to Dead Letter Queue
       await sendToDLQ(job, `Worker ${deadWorkerId} died. Exceeded max retry count (${MAX_RETRY_COUNT}).`);
     } else {
-      // Re-enqueue with incremented retryCount
-      const requeued: QueuePayload = { ...job, retryCount: nextRetry };
-      await redis.lpush(QUEUE_KEYS.PENDING, JSON.stringify(requeued));
-
-      // Reset status to PENDING in the database
+      // Re-enqueue with incremented retryCount.
+      // DB update MUST happen before Redis push: if Redis is pushed first, a worker can
+      // claim the job before the DB is PENDING and the state-machine UPDATE (WHERE status=PENDING)
+      // finds no rows — job gets silently dropped.
       await pool.query(
         `UPDATE submissions
          SET status = $1, retry_count = $2, updated_at = NOW()
          WHERE id = $3`,
         [SubmissionStatus.PENDING, nextRetry, job.jobId]
       );
+
+      const requeued: QueuePayload = { ...job, retryCount: nextRetry };
+      await redis.lpush(QUEUE_KEYS.PENDING, JSON.stringify(requeued));
 
       deadWorkerRecoveries.inc();
       logger.info(
@@ -213,6 +228,18 @@ async function recoverJobsFromDeadWorker(deadWorkerId: string): Promise<void> {
  * 4. Recovers orphan jobs from dead workers.
  */
 export async function runReaperScan(): Promise<void> {
+  // Acquire a distributed lock so only one monitor instance runs the scan at a time.
+  // If two monitors run concurrently, both would detect the same dead worker and
+  // double-enqueue its jobs — the state-machine lock in the worker prevents double
+  // execution, but wastes a queue slot. NX + PX ensures exactly-once acquisition.
+  const lockId = randomUUID();
+  const acquired = await redis.set(REAPER_LOCK_KEY, lockId, 'PX', REAPER_LOCK_TTL_MS, 'NX');
+
+  if (!acquired) {
+    logger.info('Reaper lock held by another monitor instance — skipping this cycle');
+    return;
+  }
+
   logger.info('Starting reaper scan...');
 
   try {
@@ -260,5 +287,9 @@ export async function runReaperScan(): Promise<void> {
 
   } catch (err) {
     logger.error(err, 'Reaper scan failed with unexpected error');
+  } finally {
+    // Release the lock only if we still own it (Lua script ensures atomicity).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (redis as any).eval(RELEASE_LOCK_SCRIPT, 1, REAPER_LOCK_KEY, lockId);
   }
 }
